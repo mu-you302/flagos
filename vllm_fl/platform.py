@@ -232,7 +232,7 @@ class PlatformFL(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        if cls.device_name in ["cuda", "npu"]:
+        if cls.device_name in ["cuda", "npu", "txda"]:
             return True
         return False
 
