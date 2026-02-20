@@ -74,9 +74,10 @@ class PlatformFL(Platform):
     def get_current_memory_usage(
         cls, device: Optional[torch.types.Device] = None
     ) -> float:
-        cls.torch_device_fn.empty_cache()
-        cls.torch_device_fn.reset_peak_memory_stats(device)
-        return cls.torch_device_fn.max_memory_allocated(device)
+        # cls.torch_device_fn.empty_cache()
+        # cls.torch_device_fn.reset_peak_memory_stats(device)
+        # return cls.torch_device_fn.max_memory_allocated(device)
+        return 1.0
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -87,7 +88,8 @@ class PlatformFL(Platform):
 
     @classmethod
     def empty_cache(cls) -> None:
-        cls.torch_device_fn.empty_cache()
+        # cls.torch_device_fn.empty_cache()
+        pass
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -280,6 +282,8 @@ class PlatformFL(Platform):
         # TODO(yxa): For NPU/Ascend devices, return None (no capability version like CUDA)
         if cls.device_type == "npu":
             return None
+        elif cls.device_type == "txda":
+            return DeviceCapability(major=8, minor=1)
         # For CUDA devices
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)

@@ -12,6 +12,7 @@ from typing import Optional, Union
 
 import torch
 
+# from vllm_fl.dispatch.backends.flaggems import FlagGemsBackend
 from vllm_fl.dispatch.backends.base import Backend
 
 
@@ -38,10 +39,10 @@ class TxdaBackend(Backend):
         if TxdaBackend._available is None:
             try:
                 # Check for torch_npu (Txda PyTorch extension)
-                import torch_npu
+                import torch_txda
 
                 # Check if NPU device is available
-                if torch.npu.is_available() and torch.npu.device_count() > 0:
+                if torch.txda.is_available() and torch.txda.device_count() > 0:
                     TxdaBackend._available = True
                 else:
                     TxdaBackend._available = False
@@ -51,81 +52,81 @@ class TxdaBackend(Backend):
 
     # ==================== Operator Implementations ====================
 
-    def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
-        """
-        SiLU activation followed by element-wise multiplication.
+    # def silu_and_mul(self, obj, x: torch.Tensor) -> torch.Tensor:
+    #     """
+    #     SiLU activation followed by element-wise multiplication.
 
-        Args:
-            obj: The calling obj (for interface consistency)
-            x: Input tensor of shape [..., 2*d]
+    #     Args:
+    #         obj: The calling obj (for interface consistency)
+    #         x: Input tensor of shape [..., 2*d]
 
-        Returns:
-            Output tensor of shape [..., d]
-        """
-        from .impl.activation import silu_and_mul_Txda
+    #     Returns:
+    #         Output tensor of shape [..., d]
+    #     """
+    #     from .impl.activation import silu_and_mul_Txda
 
-        return silu_and_mul_Txda(obj, x)
+    #     return silu_and_mul_Txda(obj, x)
 
-    def rms_norm(
-        self,
-        obj,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """
-        RMS normalization.
+    # def rms_norm(
+    #     self,
+    #     obj,
+    #     x: torch.Tensor,
+    #     residual: Optional[torch.Tensor] = None,
+    # ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+    #     """
+    #     RMS normalization.
 
-        Args:
-            obj: The calling obj (e.g., RMSNorm layer)
-            x: Input tensor
-            residual: Optional residual tensor
+    #     Args:
+    #         obj: The calling obj (e.g., RMSNorm layer)
+    #         x: Input tensor
+    #         residual: Optional residual tensor
 
-        Returns:
-            Normalized tensor, or tuple of (normalized, residual) if residual is provided
-        """
-        from .impl.normalization import rms_norm_Txda
+    #     Returns:
+    #         Normalized tensor, or tuple of (normalized, residual) if residual is provided
+    #     """
+    #     from .impl.normalization import rms_norm_Txda
 
-        return rms_norm_Txda(obj, x, residual)
+    #     return rms_norm_Txda(obj, x, residual)
 
-    def rotary_embedding(
-        self,
-        obj,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        position_ids: torch.Tensor,
-        rotary_interleaved: bool = False,
-        inplace: bool = True,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Apply rotary position embedding.
+    # def rotary_embedding(
+    #     self,
+    #     obj,
+    #     query: torch.Tensor,
+    #     key: torch.Tensor,
+    #     cos: torch.Tensor,
+    #     sin: torch.Tensor,
+    #     position_ids: torch.Tensor,
+    #     rotary_interleaved: bool = False,
+    #     inplace: bool = True,
+    # ) -> tuple[torch.Tensor, torch.Tensor]:
+    #     """
+    #     Apply rotary position embedding.
 
-        Args:
-            obj: The calling obj (for interface consistency)
-            query: Query tensor
-            key: Key tensor
-            cos: Cosine cache
-            sin: Sine cache
-            position_ids: Position indices
-            rotary_interleaved: Whether to use interleaved rotary
-            inplace: Whether to modify tensors in-place
+    #     Args:
+    #         obj: The calling obj (for interface consistency)
+    #         query: Query tensor
+    #         key: Key tensor
+    #         cos: Cosine cache
+    #         sin: Sine cache
+    #         position_ids: Position indices
+    #         rotary_interleaved: Whether to use interleaved rotary
+    #         inplace: Whether to modify tensors in-place
 
-        Returns:
-            Tuple of (embedded_query, embedded_key)
-        """
-        from .impl.rotary import rotary_embedding_Txda
+    #     Returns:
+    #         Tuple of (embedded_query, embedded_key)
+    #     """
+    #     from .impl.rotary import rotary_embedding_Txda
 
-        return rotary_embedding_Txda(
-            obj,
-            query,
-            key,
-            cos,
-            sin,
-            position_ids,
-            rotary_interleaved=rotary_interleaved,
-            inplace=inplace,
-        )
+    #     return rotary_embedding_Txda(
+    #         obj,
+    #         query,
+    #         key,
+    #         cos,
+    #         sin,
+    #         position_ids,
+    #         rotary_interleaved=rotary_interleaved,
+    #         inplace=inplace,
+    #     )
 
     def attention_backend(self, use_mla: bool = False) -> str:
         """
@@ -145,5 +146,5 @@ class TxdaBackend(Backend):
             Fully qualified class path string
         """
         if use_mla:
-            return "vllm_fl.dispatch.backends.vendor.Txda.impl.attention.TxdaMLABackend"
-        return "vllm_fl.dispatch.backends.vendor.Txda.impl.attention.TxdaAttentionBackend"
+            return "vllm_fl.dispatch.backends.flaggems.impl.mla.MLAFLBackend"
+        return "vllm_fl.dispatch.backends.flaggems.impl.attention.AttentionFLBackend"
