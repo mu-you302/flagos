@@ -53,10 +53,14 @@ class PlatformFL(Platform):
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
+        if self.vendor_name == "iluvatar":
+            return False
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
+        if self.vendor_name == "iluvatar":
+            return False
         return self.device_type == "cuda"
 
     @property
