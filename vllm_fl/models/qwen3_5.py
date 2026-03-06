@@ -60,7 +60,16 @@ from vllm.model_executor.models.qwen3_vl import (
 )
 
 # from vllm_fl.models.qwen3_next import (
-from vllm.model_executor.models.qwen3_next import (
+# from vllm.model_executor.models.qwen3_next import (
+#     Qwen3NextAttention,
+#     Qwen3NextDecoderLayer,
+#     Qwen3NextGatedDeltaNet,
+#     Qwen3NextModel,
+#     Qwen3NextSparseMoeBlock,
+#     QwenNextMixtureOfExperts,
+# )
+# rcy fix
+from vllm_fl.models.qwen3_next import (
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextGatedDeltaNet,
@@ -122,7 +131,10 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
                  quant_config=None, speculative_config=None, prefix=""):
         # Call grandparent init to skip Qwen3NextGatedDeltaNet.__init__
         # but set up the same attributes
-        nn.Module.__init__(self)
+        # rcy fix
+        super().__init__(config, model_config, cache_config,
+                 quant_config, speculative_config, prefix)
+        #nn.Module.__init__(self)
         from vllm.distributed import (
             divide,
             get_tensor_model_parallel_rank,
@@ -245,8 +257,9 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
         )
 
         compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
+        
+        # if prefix in compilation_config.static_forward_context:
+        #     raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
         self.chunk_gated_delta_rule = ChunkGatedDeltaRuleOp()

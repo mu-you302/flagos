@@ -72,7 +72,8 @@ class PyFlagcxCommunicator:
             ### TODO(lms): simplify it
             if library_path is None:
                 flagcx_path = os.getenv('FLAGCX_PATH')
-                library_path=os.path.join(flagcx_path, "build/lib/libflagcx.so")
+                #library_path=os.path.join(flagcx_path, "libflagcx.so") # rcy fix
+                library_path= "/usr/local/kuiper/lib/libflagcx.so"
                 self.flagcx = FLAGCXLibrary(library_path)
             else:
                 self.flagcx = FLAGCXLibrary(library_path)
@@ -113,7 +114,8 @@ class PyFlagcxCommunicator:
         # nccl communicator and stream will use this device
         # `torch.cuda.device` is a context manager that changes the
         # current cuda device to the specified one
-        with torch.cuda.device(device):
+        # 
+        with torch.txda.device(device):
             self.comm = self.flagcx.flagcxCommInitRank(
                 self.world_size, ctypes.byref(self.unique_id), self.rank)
 
@@ -144,6 +146,12 @@ class PyFlagcxCommunicator:
         if stream is None:
             stream = current_stream()
         flagcx_stream = self.flagcx.adaptor_stream_copy(stream)
+        change_type = False
+        if in_tensor.dtype == torch.bfloat16:
+            in_tensor = in_tensor.to(torch.float32)
+            out_tensor = out_tensor.to(torch.float32)
+            change_type = True
+
         self.flagcx.flagcxAllReduce(buffer_type(in_tensor.data_ptr()),
                                 buffer_type(out_tensor.data_ptr()),
                                 in_tensor.numel(),
@@ -151,6 +159,10 @@ class PyFlagcxCommunicator:
                                 flagcxRedOpTypeEnum.from_torch(op), self.comm,
                                 flagcx_stream)
         self.flagcx.adaptor_stream_free(flagcx_stream)
+        if change_type:
+            in_tensor = in_tensor.to(torch.bfloat16)
+            out_tensor = out_tensor.to(torch.bfloat16)
+
         return out_tensor
 
     def all_gather(self,

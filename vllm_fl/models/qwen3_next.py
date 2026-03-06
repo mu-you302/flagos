@@ -89,8 +89,9 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-
-from vllm_fl.ops.fla import ChunkGatedDeltaRuleOp, FusedRecurrentGatedDeltaRuleOp
+#
+from vllm_fl.models.fla_ops import ChunkGatedDeltaRuleOp
+from vllm_fl.ops.fla import FusedRecurrentGatedDeltaRuleOp
 
 logger = init_logger(__name__)
 
@@ -356,10 +357,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRuleOp(
-            output_final_state = True,
-            use_qk_l2norm_in_kernel=True,
-        )
+        # self.chunk_gated_delta_rule = ChunkGatedDeltaRuleOp(
+        #     output_final_state = True,
+        #     use_qk_l2norm_in_kernel=True,
+        # ) rcy fix
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRuleOp()
+        
 
         self.fused_recurrent_gated_delta_rule_multi_query = FusedRecurrentGatedDeltaRuleOp(
             inplace_final_state=True,
@@ -655,7 +658,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 g=g_non_spec,
                 beta=beta_non_spec,
                 initial_state=initial_state,
+                output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
+                head_first=False,
+                use_qk_l2norm_in_kernel=True
             )
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(

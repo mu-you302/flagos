@@ -46,21 +46,18 @@ class PlatformFL(Platform):
     dispatch_key = device_info.dispatch_key
     torch_device_fn = device_info.torch_device_fn
     vendor_name = device_info.vendor_name
-    ray_device_key: str = "GPU"
+    ray_device_key: str = "flagos"
     dist_backend: str = "flagcx" if "FLAGCX_PATH" in os.environ else "nccl"
+    device_control_env_var: str = "TXDA_VISIBLE_DEVICES"
     ### TODO(lms): dispatch device_control_env_var
     # device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
-        if self.vendor_name == "iluvatar":
-            return False
         return self.device_type == "cuda"
 
     def is_cuda(self) -> bool:
         """Stateless version of [torch.cuda.is_available][]."""
-        if self.vendor_name == "iluvatar":
-            return False
         return self.device_type == "cuda"
 
     @property
