@@ -8,11 +8,10 @@ NOTE: These tests require multiple GPUs and a distributed environment.
 They are designed to be run with pytest-mpi or similar multi-process test runners.
 """
 
-import pytest
-import torch
-from typing import List
 from unittest.mock import MagicMock
 
+import pytest
+import torch
 
 # Mark all tests as requiring multiple GPUs
 pytestmark = [pytest.mark.multi_gpu, pytest.mark.gpu]
@@ -25,6 +24,7 @@ class TestCollectiveOpsBasic:
         """Test that CommunicatorFL can be imported."""
         try:
             from vllm_fl.distributed.communicator import CommunicatorFL
+
             assert CommunicatorFL is not None
         except ImportError as e:
             pytest.skip(f"CommunicatorFL not available: {e}")
@@ -32,7 +32,10 @@ class TestCollectiveOpsBasic:
     def test_pyflagcx_import(self):
         """Test that PyFlagcxCommunicator can be imported."""
         try:
-            from vllm_fl.distributed.device_communicators.flagcx import PyFlagcxCommunicator
+            from vllm_fl.distributed.device_communicators.flagcx import (
+                PyFlagcxCommunicator,
+            )
+
             assert PyFlagcxCommunicator is not None
         except ImportError as e:
             pytest.skip(f"PyFlagcxCommunicator not available: {e}")
@@ -42,13 +45,13 @@ class TestAllReduceCorrectness:
     """Test all_reduce operation correctness."""
 
     @staticmethod
-    def reference_all_reduce(tensors: List[torch.Tensor]) -> torch.Tensor:
+    def reference_all_reduce(tensors: list[torch.Tensor]) -> torch.Tensor:
         """Reference implementation of all_reduce (sum)."""
         return sum(tensors)
 
     @pytest.mark.skipif(
         not torch.cuda.is_available() or torch.cuda.device_count() < 2,
-        reason="Multiple GPUs not available"
+        reason="Multiple GPUs not available",
     )
     def test_all_reduce_sum_correctness(self):
         """Test all_reduce sum produces correct results."""
@@ -68,9 +71,8 @@ class TestReduceScatterCorrectness:
 
     @staticmethod
     def reference_reduce_scatter(
-        input_tensor: torch.Tensor,
-        world_size: int
-    ) -> List[torch.Tensor]:
+        input_tensor: torch.Tensor, world_size: int
+    ) -> list[torch.Tensor]:
         """Reference implementation of reduce_scatter."""
         # Split input into chunks
         chunks = input_tensor.chunk(world_size, dim=0)
@@ -79,12 +81,14 @@ class TestReduceScatterCorrectness:
 
     def test_reduce_scatter_reference(self):
         """Test reference reduce_scatter implementation."""
-        input_tensor = torch.tensor([
-            [1.0, 2.0],
-            [3.0, 4.0],
-            [5.0, 6.0],
-            [7.0, 8.0],
-        ])
+        input_tensor = torch.tensor(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+                [5.0, 6.0],
+                [7.0, 8.0],
+            ]
+        )
         world_size = 2
 
         result = self.reference_reduce_scatter(input_tensor, world_size)
@@ -98,7 +102,7 @@ class TestAllGatherCorrectness:
     """Test all_gather operation correctness."""
 
     @staticmethod
-    def reference_all_gather(tensors: List[torch.Tensor]) -> torch.Tensor:
+    def reference_all_gather(tensors: list[torch.Tensor]) -> torch.Tensor:
         """Reference implementation of all_gather."""
         return torch.cat(tensors, dim=0)
 
@@ -108,10 +112,12 @@ class TestAllGatherCorrectness:
             torch.tensor([[1.0, 2.0]]),
             torch.tensor([[3.0, 4.0]]),
         ]
-        expected = torch.tensor([
-            [1.0, 2.0],
-            [3.0, 4.0],
-        ])
+        expected = torch.tensor(
+            [
+                [1.0, 2.0],
+                [3.0, 4.0],
+            ]
+        )
 
         result = self.reference_all_gather(tensors)
         assert torch.allclose(result, expected)
@@ -122,7 +128,7 @@ class TestSendRecvCorrectness:
 
     @pytest.mark.skipif(
         not torch.cuda.is_available() or torch.cuda.device_count() < 2,
-        reason="Multiple GPUs not available"
+        reason="Multiple GPUs not available",
     )
     def test_send_recv_mock(self):
         """Test send/recv with mocked communicator."""

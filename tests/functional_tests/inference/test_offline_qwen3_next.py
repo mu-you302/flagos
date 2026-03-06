@@ -8,6 +8,7 @@ Tests basic generation and knowledge validation with tensor parallelism.
 import os
 
 import pytest
+
 from vllm import LLM, SamplingParams
 
 MODEL_PATH = "/data/models/Qwen/Qwen3-Next-80B-A3B-Instruct"

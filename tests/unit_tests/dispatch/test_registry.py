@@ -5,6 +5,7 @@ Tests for dispatch registry.
 """
 
 import pytest
+
 from vllm_fl.dispatch.registry import OpRegistry, OpRegistrySnapshot
 from vllm_fl.dispatch.types import BackendImplKind, OpImpl
 

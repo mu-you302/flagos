@@ -5,21 +5,22 @@ Tests for dispatch policy module.
 """
 
 import os
-import pytest
 import tempfile
 from unittest.mock import patch
 
+import pytest
+
 from vllm_fl.dispatch.policy import (
-    SelectionPolicy,
-    PolicyManager,
     PREFER_DEFAULT,
-    PREFER_VENDOR,
     PREFER_REFERENCE,
+    PREFER_VENDOR,
     VALID_PREFER_VALUES,
+    PolicyManager,
+    SelectionPolicy,
     get_policy,
-    set_global_policy,
-    reset_global_policy,
     policy_context,
+    reset_global_policy,
+    set_global_policy,
     with_preference,
     with_strict_mode,
 )
@@ -249,6 +250,7 @@ op_backends:
 
         try:
             from vllm_fl.dispatch.policy import policy_from_config
+
             policy = policy_from_config(config_path)
 
             assert policy.prefer == "vendor"
@@ -261,5 +263,6 @@ op_backends:
 
     def test_policy_from_nonexistent_config(self):
         from vllm_fl.dispatch.policy import policy_from_config
+
         with pytest.raises(FileNotFoundError):
             policy_from_config("/nonexistent/path/config.yaml")

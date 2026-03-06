@@ -1,6 +1,39 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools-scm[toml]>=6.2"]
+requires = [
+    "packaging>=24.2",
+    "setuptools>=77.0.3,<81.0.0",
+    "setuptools-scm>=8.0",
+    "torch>=2.7.1",
+    "wheel",
+]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-plugin-fl"
+version = "0.1.0"
+description = "A vLLM plugin built on the FlagOS unified multi-chip backend"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+
+[project.urls]
+Homepage = "https://github.com/flagos-ai/vllm-plugin-FL"
+
+[project.optional-dependencies]
+test = [
+    "pytest",
+    "pytest-cov",
+    "numpy",
+    "torch>=2.7.1",
+    "pyyaml",
+    "decorator",
+    "vllm[audio]==0.13.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["vllm_fl*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -40,22 +73,53 @@ exclude_lines = [
 ]
 
 [tool.ruff]
-line-length = 100
-target-version = "py39"
+exclude = [
+    "vllm_fl/**",
+
+]
 
 [tool.ruff.lint]
 select = [
     "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
     "F",   # pyflakes
-    "I",   # isort
+    "UP",  # pyupgrade
     "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
+    "ISC", # flake8-implicit-str-concat
+    "SIM", # flake8-simplify
+    "I",   # isort
+    "G",   # flake8-logging-format
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
+    "E731",  # lambda expression assignment
+    "E402",  # Module level import not at top of file
+    "E722",  # Use bare except, specify exception instead
+    "E731",  # lambda assignment
+    "E741",  # Use variables named 'l', 'O', or 'I'
+    "F405",  # star imports
+    "F403",  # star imports
     "B008",  # do not perform function calls in argument defaults
+    "B905",  # zip without `strict=`
+    "B007",  # Loop control variable not used within loop body
+    "UP015", # Explicit is better than implicit" rule
+    "UP032", # f-string format
+    "G004",  # logging f-string
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["vllm_fl"]
+combine-as-imports = true
+known-first-party = ["vllm"]
+known-local-folder = ["vllm_fl"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.typos.files]
+# these files may be written in non english words
+extend-exclude = ["tests/**", "vllm_fl/**"]
+ignore-hidden = true
+ignore-files = true
+ignore-dot = true
+ignore-vcs = true
+ignore-global = true
+ignore-parent = true

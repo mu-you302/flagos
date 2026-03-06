@@ -7,14 +7,15 @@ This module provides shared fixtures for all unit tests.
 """
 
 import os
-import pytest
-import torch
 from unittest.mock import MagicMock, NonCallableMagicMock
 
+import pytest
+import torch
 
 # =============================================================================
 # Environment Detection Helpers
 # =============================================================================
+
 
 def has_cuda():
     """Check if CUDA is available."""
@@ -23,7 +24,7 @@ def has_cuda():
 
 def has_flagcx():
     """Check if flagcx is available."""
-    flagcx_path = os.getenv('FLAGCX_PATH')
+    flagcx_path = os.getenv("FLAGCX_PATH")
     if not flagcx_path:
         return False
     lib_path = os.path.join(flagcx_path, "build/lib/libflagcx.so")
@@ -33,7 +34,8 @@ def has_flagcx():
 def has_vllm_profiler():
     """Check if vllm profiler is available."""
     try:
-        from vllm.profiler.wrapper import TorchProfilerWrapper
+        from vllm.profiler.wrapper import TorchProfilerWrapper  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -42,6 +44,7 @@ def has_vllm_profiler():
 # =============================================================================
 # Basic Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def mock_tensor():
@@ -67,6 +70,7 @@ def cpu_device():
 # Mock Factory Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def mock_module():
     """
@@ -76,7 +80,7 @@ def mock_module():
     - Is not callable
     - May have specific attributes
     """
-    return NonCallableMagicMock(spec=['__name__', '__file__'])
+    return NonCallableMagicMock(spec=["__name__", "__file__"])
 
 
 @pytest.fixture
@@ -86,7 +90,7 @@ def mock_module_with_register():
 
     Useful for testing plugin discovery.
     """
-    module = NonCallableMagicMock(spec=['register'])
+    module = NonCallableMagicMock(spec=["register"])
     module.register = MagicMock()
     return module
 
@@ -108,13 +112,14 @@ def mock_process_group():
 # Tensor Fixtures
 # =============================================================================
 
+
 @pytest.fixture
 def batch_tensors():
     """Create a batch of tensors for testing."""
     return {
-        'small': torch.randn(2, 8),
-        'medium': torch.randn(4, 16, 32),
-        'large': torch.randn(8, 32, 64, 128),
+        "small": torch.randn(2, 8),
+        "medium": torch.randn(4, 16, 32),
+        "large": torch.randn(8, 32, 64, 128),
     }
 
 
@@ -122,9 +127,9 @@ def batch_tensors():
 def dtype_tensors():
     """Create tensors with different dtypes."""
     return {
-        'float32': torch.randn(2, 4, dtype=torch.float32),
-        'float16': torch.randn(2, 4, dtype=torch.float16),
-        'bfloat16': torch.randn(2, 4, dtype=torch.bfloat16),
+        "float32": torch.randn(2, 4, dtype=torch.float32),
+        "float16": torch.randn(2, 4, dtype=torch.float16),
+        "bfloat16": torch.randn(2, 4, dtype=torch.bfloat16),
     }
 
 
@@ -132,14 +137,9 @@ def dtype_tensors():
 # Pytest Markers
 # =============================================================================
 
+
 def pytest_configure(config):
     """Register custom markers."""
-    config.addinivalue_line(
-        "markers", "gpu: marks tests as requiring GPU"
-    )
-    config.addinivalue_line(
-        "markers", "flagcx: marks tests as requiring flagcx"
-    )
-    config.addinivalue_line(
-        "markers", "slow: marks tests as slow"
-    )
+    config.addinivalue_line("markers", "gpu: marks tests as requiring GPU")
+    config.addinivalue_line("markers", "flagcx: marks tests as requiring flagcx")
+    config.addinivalue_line("markers", "slow: marks tests as slow")

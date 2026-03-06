@@ -33,7 +33,7 @@ pip install --no-build-isolation -e .
 pip install flag-gems==4.2.1rc0 [-i https://pypi.tuna.tsinghua.edu.cn/simple]
 ```
 
-#### 1.2.3 [Opitonal] Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
+#### 1.2.3 [Optional] Install [FlagCX](https://github.com/flagos-ai/FlagCX/blob/main/docs/getting_started.md#build-and-installation)
 
 ```sh
 git clone https://github.com/flagos-ai/FlagCX.git

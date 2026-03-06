@@ -61,7 +61,9 @@ def vllm_server():
     ]
 
     print(f"\n[Setup] Starting vLLM service: {' '.join(cmd)}")
-    log_file = tempfile.NamedTemporaryFile(prefix="vllm_minicpm_", suffix=".log", delete=False)
+    log_file = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        prefix="vllm_minicpm_", suffix=".log", delete=False
+    )
     process = subprocess.Popen(
         cmd, stdout=log_file, stderr=subprocess.STDOUT, preexec_fn=os.setsid
     )
@@ -145,6 +147,8 @@ def test_chat_completion(base_url, headers):
         "messages": [{"role": "user", "content": "Running test."}],
         "max_tokens": 100,
     }
-    response = requests.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+    response = requests.post(
+        f"{base_url}/chat/completions", headers=headers, json=payload
+    )
     assert response.status_code == 200
     print(f"Response: {response.json()['choices'][0]['message']['content']}")

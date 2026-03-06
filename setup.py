@@ -1,8 +1,6 @@
 import os
-from typing import List
 
 from setuptools import find_packages, setup
-from setuptools_scm import get_version
 
 ROOT_DIR = os.path.dirname(__file__)
 VERSION = "0.0.0"
@@ -22,10 +20,10 @@ def read_readme() -> str:
         return ""
 
 
-def get_requirements() -> List[str]:
+def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
 
-    def _read_requirements(filename: str) -> List[str]:
+    def _read_requirements(filename: str) -> list[str]:
         with open(get_path(filename)) as f:
             requirements = f.read().strip().split("\n")
         resolved_requirements = []
@@ -46,7 +44,7 @@ def get_requirements() -> List[str]:
 
 
 setup(
-    name='vllm_fl',
+    name="vllm_fl",
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
     version=VERSION,
@@ -60,7 +58,6 @@ setup(
         "Homepage": "https://github.com/flagos-ai/vllm-plugin-FL",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
@@ -72,10 +69,13 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*")),
-    python_requires=">=3.9",
+    package_data={
+        "vllm_fl.dispatch.config": ["*.yaml"],
+    },
+    python_requires=">=3.10",
     install_requires=get_requirements(),
-    extras_require={},
-    entry_points={'vllm.platform_plugins': ["fl = vllm_fl:register"],
-                  'vllm.general_plugins': ["fl = vllm_fl:register_model"]}
+    entry_points={
+        "vllm.platform_plugins": ["fl = vllm_fl:register"],
+        "vllm.general_plugins": ["fl = vllm_fl:register_model"],
+    },
 )
-

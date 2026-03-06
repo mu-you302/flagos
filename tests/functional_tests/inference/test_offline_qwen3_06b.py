@@ -8,9 +8,11 @@ Tests basic model generation with VllmRunner in eager and graph mode.
 import os
 
 import pytest
+
 import vllm  # noqa: F401
-from .vllm_runner import VllmRunner
+
 import vllm_fl  # noqa: F401
+from .vllm_runner import VllmRunner
 
 MODEL_PATH = "/data/models/Qwen/Qwen3-0.6B"
 pytestmark = pytest.mark.skipif(
@@ -38,13 +40,18 @@ def test_models(
     max_tokens: int,
     enforce_eager: bool,
 ) -> None:
-    prompt = "The following numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
+    prompt = (
+        "The following numbers of the sequence "
+        + ", ".join(str(i) for i in range(1024))
+        + " are:"
+    )
     example_prompts = [prompt]
 
-    with VllmRunner(MODEL_PATH,
-                    max_model_len=8192,
-                    dtype=dtype,
-                    enforce_eager=enforce_eager,
-                    gpu_memory_utilization=0.7) as vllm_model:
+    with VllmRunner(
+        MODEL_PATH,
+        max_model_len=8192,
+        dtype=dtype,
+        enforce_eager=enforce_eager,
+        gpu_memory_utilization=0.7,
+    ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

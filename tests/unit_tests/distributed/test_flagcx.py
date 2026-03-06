@@ -10,12 +10,13 @@ Integration tests for actual distributed operations should be in functional_test
 """
 
 import os
+
 import pytest
 
 
 def has_flagcx():
     """Check if flagcx is available (both library and Python bindings)."""
-    flagcx_path = os.getenv('FLAGCX_PATH')
+    flagcx_path = os.getenv("FLAGCX_PATH")
     if not flagcx_path:
         return False
     lib_path = os.path.join(flagcx_path, "build/lib/libflagcx.so")
@@ -23,7 +24,8 @@ def has_flagcx():
         return False
     # Also check Python bindings
     try:
-        from plugin.interservice.flagcx_wrapper import flagcxDataTypeEnum
+        from plugin.interservice.flagcx_wrapper import flagcxDataTypeEnum  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -32,7 +34,7 @@ def has_flagcx():
 # Mark all tests in this module as requiring flagcx
 pytestmark = pytest.mark.skipif(
     not has_flagcx(),
-    reason="FLAGCX_PATH not set, flagcx library not found, or Python bindings unavailable"
+    reason="FLAGCX_PATH not set, flagcx library not found, or Python bindings unavailable",
 )
 
 

@@ -41,6 +41,7 @@ def register():
 def register_model():
     """Register the FL model."""
     from vllm import ModelRegistry
+    import vllm.model_executor.models.qwen3_next as qwen3_next_module
 
     # Register Qwen3.5 MoE config
     try:
@@ -52,6 +53,14 @@ def register_model():
 
     # Register Qwen3Next model
     try:
+        from vllm_fl.models.qwen3_next import Qwen3NextForCausalLM  # noqa: F401
+
+        qwen3_next_module.Qwen3NextForCausalLM = Qwen3NextForCausalLM
+        logger.warning(
+            "Qwen3NextForCausalLM has been patched to use vllm_fl.models.qwen3_next, "
+            "original vLLM implementation is overridden"
+        )
+
         ModelRegistry.register_model(
             "Qwen3NextForCausalLM",
             "vllm_fl.models.qwen3_next:Qwen3NextForCausalLM"
@@ -85,3 +94,15 @@ def register_model():
         )
     except Exception as e:
         logger.error(f"Register KimiK25 model error: {str(e)}")
+
+    # Register GLM-5 (GlmMoeDsa) model
+    try:
+        from vllm_fl.models.glm_moe_dsa import patch_is_deepseek_mla
+        patch_is_deepseek_mla()
+
+        ModelRegistry.register_model(
+            "GlmMoeDsaForCausalLM",
+            "vllm_fl.models.glm_moe_dsa:GlmMoeDsaForCausalLM"
+        )
+    except Exception as e:
+        logger.error(f"Register GlmMoeDsa model error: {str(e)}")

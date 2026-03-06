@@ -12,6 +12,7 @@ import os
 
 import pytest
 from transformers import AutoTokenizer
+
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 
@@ -84,8 +85,7 @@ class TestMiniCPMO:
         if audio_count > 0:
             mm_data = {
                 "audio": [
-                    asset.audio_and_sample_rate
-                    for asset in AUDIO_ASSETS[:audio_count]
+                    asset.audio_and_sample_rate for asset in AUDIO_ASSETS[:audio_count]
                 ]
             }
 

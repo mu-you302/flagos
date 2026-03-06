@@ -9,23 +9,24 @@ works correctly from call_op -> manager -> registry -> implementation.
 """
 
 import os
-import pytest
 from unittest.mock import patch
 
+import pytest
+
 from vllm_fl.dispatch import (
-    call_op,
-    resolve_op,
-    get_default_manager,
-    reset_default_manager,
-    OpImpl,
+    PREFER_REFERENCE,
+    PREFER_VENDOR,
     BackendImplKind,
     BackendPriority,
+    OpImpl,
     SelectionPolicy,
-    set_global_policy,
+    call_op,
+    get_default_manager,
+    reset_default_manager,
     reset_global_policy,
+    resolve_op,
+    set_global_policy,
     with_preference,
-    PREFER_VENDOR,
-    PREFER_REFERENCE,
 )
 
 
@@ -87,12 +88,14 @@ class TestCallOp:
             call_tracker["called"] = True
             return x
 
-        manager.registry.register_impl(OpImpl(
-            op_name="track_op",
-            impl_id="default.track",
-            kind=BackendImplKind.DEFAULT,
-            fn=tracking_fn,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="track_op",
+                impl_id="default.track",
+                kind=BackendImplKind.DEFAULT,
+                fn=tracking_fn,
+            )
+        )
 
         call_op("track_op", 1)
         assert call_tracker["called"] is True
@@ -178,28 +181,34 @@ class TestCallOpWithPolicy:
             results["reference"] += 1
             return x * 4
 
-        manager.registry.register_impl(OpImpl(
-            op_name="policy_op",
-            impl_id="default.impl",
-            kind=BackendImplKind.DEFAULT,
-            fn=default_fn,
-            priority=BackendPriority.DEFAULT,
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="policy_op",
-            impl_id="vendor.cuda",
-            kind=BackendImplKind.VENDOR,
-            fn=vendor_fn,
-            priority=BackendPriority.VENDOR,
-            vendor="CUDA",
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="policy_op",
-            impl_id="reference.pytorch",
-            kind=BackendImplKind.REFERENCE,
-            fn=reference_fn,
-            priority=BackendPriority.REFERENCE,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="policy_op",
+                impl_id="default.impl",
+                kind=BackendImplKind.DEFAULT,
+                fn=default_fn,
+                priority=BackendPriority.DEFAULT,
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="policy_op",
+                impl_id="vendor.cuda",
+                kind=BackendImplKind.VENDOR,
+                fn=vendor_fn,
+                priority=BackendPriority.VENDOR,
+                vendor="CUDA",
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="policy_op",
+                impl_id="reference.pytorch",
+                kind=BackendImplKind.REFERENCE,
+                fn=reference_fn,
+                priority=BackendPriority.REFERENCE,
+            )
+        )
 
         return results
 
@@ -276,24 +285,30 @@ class TestCallOpIntegration:
         manager._state.init_pid = os.getpid()
 
         # Register multiple operators
-        manager.registry.register_impl(OpImpl(
-            op_name="add_op",
-            impl_id="default.add",
-            kind=BackendImplKind.DEFAULT,
-            fn=lambda x, y: x + y,
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="mul_op",
-            impl_id="default.mul",
-            kind=BackendImplKind.DEFAULT,
-            fn=lambda x, y: x * y,
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="sub_op",
-            impl_id="default.sub",
-            kind=BackendImplKind.DEFAULT,
-            fn=lambda x, y: x - y,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="add_op",
+                impl_id="default.add",
+                kind=BackendImplKind.DEFAULT,
+                fn=lambda x, y: x + y,
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="mul_op",
+                impl_id="default.mul",
+                kind=BackendImplKind.DEFAULT,
+                fn=lambda x, y: x * y,
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="sub_op",
+                impl_id="default.sub",
+                kind=BackendImplKind.DEFAULT,
+                fn=lambda x, y: x - y,
+            )
+        )
 
         # Call each operator
         assert call_op("add_op", 2, 3) == 5
@@ -306,12 +321,14 @@ class TestCallOpIntegration:
         manager._state.initialized = True
         manager._state.init_pid = os.getpid()
 
-        manager.registry.register_impl(OpImpl(
-            op_name="consistent_op",
-            impl_id="default.impl",
-            kind=BackendImplKind.DEFAULT,
-            fn=lambda x: x * 10,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="consistent_op",
+                impl_id="default.impl",
+                kind=BackendImplKind.DEFAULT,
+                fn=lambda x: x * 10,
+            )
+        )
 
         # Both should give same result
         fn = resolve_op("consistent_op")
@@ -337,20 +354,24 @@ class TestCallOpIntegration:
             call_sequence.append("success")
             return x * 2
 
-        manager.registry.register_impl(OpImpl(
-            op_name="fallback_chain_op",
-            impl_id="default.failing",
-            kind=BackendImplKind.DEFAULT,
-            fn=failing_impl,
-            priority=200,
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="fallback_chain_op",
-            impl_id="reference.success",
-            kind=BackendImplKind.REFERENCE,
-            fn=success_impl,
-            priority=100,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="fallback_chain_op",
+                impl_id="default.failing",
+                kind=BackendImplKind.DEFAULT,
+                fn=failing_impl,
+                priority=200,
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="fallback_chain_op",
+                impl_id="reference.success",
+                kind=BackendImplKind.REFERENCE,
+                fn=success_impl,
+                priority=100,
+            )
+        )
 
         result = call_op("fallback_chain_op", 5)
 
@@ -363,32 +384,37 @@ class TestCallOpIntegration:
         manager._state.initialized = True
         manager._state.init_pid = os.getpid()
 
-        manager.registry.register_impl(OpImpl(
-            op_name="vendor_filter_op",
-            impl_id="vendor.cuda",
-            kind=BackendImplKind.VENDOR,
-            fn=lambda x: x * 2,
-            vendor="CUDA",
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="vendor_filter_op",
-            impl_id="vendor.amd",
-            kind=BackendImplKind.VENDOR,
-            fn=lambda x: x * 3,
-            vendor="AMD",
-        ))
-        manager.registry.register_impl(OpImpl(
-            op_name="vendor_filter_op",
-            impl_id="reference.pytorch",
-            kind=BackendImplKind.REFERENCE,
-            fn=lambda x: x * 4,
-        ))
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="vendor_filter_op",
+                impl_id="vendor.cuda",
+                kind=BackendImplKind.VENDOR,
+                fn=lambda x: x * 2,
+                vendor="CUDA",
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="vendor_filter_op",
+                impl_id="vendor.amd",
+                kind=BackendImplKind.VENDOR,
+                fn=lambda x: x * 3,
+                vendor="AMD",
+            )
+        )
+        manager.registry.register_impl(
+            OpImpl(
+                op_name="vendor_filter_op",
+                impl_id="reference.pytorch",
+                kind=BackendImplKind.REFERENCE,
+                fn=lambda x: x * 4,
+            )
+        )
 
         # Deny AMD, prefer vendor -> should use CUDA
-        set_global_policy(SelectionPolicy(
-            prefer=PREFER_VENDOR,
-            deny_vendors=frozenset({"AMD"})
-        ))
+        set_global_policy(
+            SelectionPolicy(prefer=PREFER_VENDOR, deny_vendors=frozenset({"AMD"}))
+        )
         manager.bump_policy_epoch()
 
         result = call_op("vendor_filter_op", 5)

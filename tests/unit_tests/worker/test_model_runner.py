@@ -11,20 +11,22 @@ This module follows a layered testing strategy:
 Note: These tests require vllm >= 0.13.0 with full installation.
 """
 
-import pytest
-import numpy as np
-import torch
 from unittest.mock import MagicMock
 
+import numpy as np
+import pytest
+import torch
 
 # =============================================================================
 # Test Utilities - Check availability before importing
 # =============================================================================
 
+
 def has_vllm_model_runner():
     """Check if vllm model runner dependencies are available."""
     try:
-        from vllm_fl.worker.model_runner import ModelRunnerFL
+        from vllm_fl.worker.model_runner import ModelRunnerFL  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -32,14 +34,14 @@ def has_vllm_model_runner():
 
 # Skip all tests if vllm model runner is not available
 pytestmark = pytest.mark.skipif(
-    not has_vllm_model_runner(),
-    reason="vllm_fl.worker.model_runner not available"
+    not has_vllm_model_runner(), reason="vllm_fl.worker.model_runner not available"
 )
 
 
 # =============================================================================
 # Layer 1: ExecuteModelState Data Structure Tests
 # =============================================================================
+
 
 class TestExecuteModelState:
     """Test ExecuteModelState NamedTuple behavior and contract."""
@@ -49,10 +51,15 @@ class TestExecuteModelState:
         from vllm_fl.worker.model_runner import ExecuteModelState
 
         expected_fields = (
-            'scheduler_output', 'logits', 'spec_decode_metadata',
-            'spec_decode_common_attn_metadata', 'hidden_states',
-            'sample_hidden_states', 'aux_hidden_states',
-            'ec_connector_output', 'cudagraph_stats'
+            "scheduler_output",
+            "logits",
+            "spec_decode_metadata",
+            "spec_decode_common_attn_metadata",
+            "hidden_states",
+            "sample_hidden_states",
+            "aux_hidden_states",
+            "ec_connector_output",
+            "cudagraph_stats",
         )
         assert ExecuteModelState._fields == expected_fields, (
             "ExecuteModelState fields changed - this may break execute_model consumers"
@@ -106,6 +113,7 @@ class TestExecuteModelState:
 # Layer 2: _get_cumsum_and_arange Algorithm Tests
 # =============================================================================
 
+
 class TestGetCumsumAndArange:
     """Test _get_cumsum_and_arange method - critical for batch processing."""
 
@@ -116,8 +124,8 @@ class TestGetCumsumAndArange:
 
         mock_runner = MagicMock(spec=ModelRunnerFL)
         mock_runner.arange_np = np.arange(10000)
-        mock_runner._get_cumsum_and_arange = ModelRunnerFL._get_cumsum_and_arange.__get__(
-            mock_runner, ModelRunnerFL
+        mock_runner._get_cumsum_and_arange = (
+            ModelRunnerFL._get_cumsum_and_arange.__get__(mock_runner, ModelRunnerFL)
         )
         return mock_runner
 
@@ -180,6 +188,7 @@ class TestGetCumsumAndArange:
 # Layer 2: _pad_for_sequence_parallelism Logic Tests
 # =============================================================================
 
+
 class TestPadForSequenceParallelism:
     """Test sequence parallelism padding logic."""
 
@@ -214,14 +223,19 @@ class TestPadForSequenceParallelism:
 
         assert mock_model_runner._pad_for_sequence_parallelism(10) == 10
 
-    @pytest.mark.parametrize("num_tokens,tp_size,expected", [
-        (10, 4, 12),   # 10 -> ceil to multiple of 4
-        (8, 4, 8),     # 8 already multiple of 4
-        (10, 8, 16),   # 10 -> ceil to multiple of 8
-        (1, 4, 4),     # 1 -> ceil to multiple of 4
-        (15, 8, 16),   # 15 -> ceil to multiple of 8
-    ])
-    def test_padding_calculation(self, mock_model_runner, num_tokens, tp_size, expected):
+    @pytest.mark.parametrize(
+        "num_tokens,tp_size,expected",
+        [
+            (10, 4, 12),  # 10 -> ceil to multiple of 4
+            (8, 4, 8),  # 8 already multiple of 4
+            (10, 8, 16),  # 10 -> ceil to multiple of 8
+            (1, 4, 4),  # 1 -> ceil to multiple of 4
+            (15, 8, 16),  # 15 -> ceil to multiple of 8
+        ],
+    )
+    def test_padding_calculation(
+        self, mock_model_runner, num_tokens, tp_size, expected
+    ):
         """Verify padding rounds up to next multiple of tp_size."""
         mock_model_runner.vllm_config.parallel_config.tensor_parallel_size = tp_size
         mock_model_runner.compilation_config.pass_config.enable_sp = True
@@ -235,6 +249,7 @@ class TestPadForSequenceParallelism:
 # =============================================================================
 # Layer 2: _get_positions Routing Tests
 # =============================================================================
+
 
 class TestGetPositions:
     """Test position retrieval for different position encoding schemes."""

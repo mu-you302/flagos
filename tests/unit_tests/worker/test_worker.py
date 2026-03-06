@@ -12,7 +12,8 @@ import pytest
 def has_vllm_profiler():
     """Check if vllm profiler is available."""
     try:
-        from vllm.profiler.wrapper import TorchProfilerWrapper
+        from vllm.profiler.wrapper import TorchProfilerWrapper  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -21,7 +22,7 @@ def has_vllm_profiler():
 # Skip all tests if vllm profiler is not available
 pytestmark = pytest.mark.skipif(
     not has_vllm_profiler(),
-    reason="vllm.profiler.wrapper not available (requires vllm >= 0.13.0)"
+    reason="vllm.profiler.wrapper not available (requires vllm >= 0.13.0)",
 )
 
 

@@ -8,12 +8,13 @@ Tests are skipped if flagcx is not available.
 """
 
 import os
+
 import pytest
 
 
 def has_flagcx():
     """Check if flagcx is available."""
-    flagcx_path = os.getenv('FLAGCX_PATH')
+    flagcx_path = os.getenv("FLAGCX_PATH")
     if not flagcx_path:
         return False
     lib_path = os.path.join(flagcx_path, "build/lib/libflagcx.so")
@@ -22,8 +23,7 @@ def has_flagcx():
 
 # Skip all tests if flagcx is not available (communicator depends on it)
 pytestmark = pytest.mark.skipif(
-    not has_flagcx(),
-    reason="FLAGCX_PATH not set or flagcx library not found"
+    not has_flagcx(), reason="FLAGCX_PATH not set or flagcx library not found"
 )
 
 

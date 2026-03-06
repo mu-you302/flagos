@@ -48,6 +48,7 @@ def vllm_server():
         "512",
         "--gpu-memory-utilization",
         "0.85",
+        "--enforce-eager",
         "--host",
         HOST,
         "--port",
@@ -55,7 +56,9 @@ def vllm_server():
     ]
 
     print(f"\n[Setup] Starting vLLM service (TP={TP_SIZE}): {' '.join(cmd)}")
-    log_file = tempfile.NamedTemporaryFile(prefix="vllm_qwen3_next_", suffix=".log", delete=False)
+    log_file = tempfile.NamedTemporaryFile(  # noqa: SIM115
+        prefix="vllm_qwen3_next_", suffix=".log", delete=False
+    )
     process = subprocess.Popen(
         cmd, stdout=log_file, stderr=subprocess.STDOUT, preexec_fn=os.setsid
     )

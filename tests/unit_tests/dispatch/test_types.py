@@ -5,6 +5,7 @@ Tests for dispatch type definitions.
 """
 
 import pytest
+
 from vllm_fl.dispatch.types import (
     BackendImplKind,
     BackendPriority,
