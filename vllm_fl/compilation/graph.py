@@ -40,7 +40,8 @@ class Graph:
     elif current_platform.device_type == "npu":
         graph = torch.npu.NPUGraph
     else:
-        raise NotImplementedError("not support graph")
+        pass
+        # raise NotImplementedError("not support graph")
     
 @dataclasses.dataclass
 class GraphEntry:

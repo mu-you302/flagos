@@ -41,7 +41,6 @@ def register():
 def register_model():
     """Register the FL model."""
     from vllm import ModelRegistry
-    import vllm.model_executor.models.qwen3_next as qwen3_next_module
 
     # Register Qwen3.5 MoE config
     try:
