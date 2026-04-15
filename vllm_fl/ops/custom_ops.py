@@ -22,13 +22,11 @@ OOT_OPS = {
     "gelu_and_mul": (GeluAndMulFL, "GeluAndMul"),  # noqa F405
     "rms_norm": (RMSNormFL, "RMSNorm"),  # noqa F405
     "rotary_embedding": (RotaryEmbeddingFL, "RotaryEmbedding"),  # noqa F405
-    "fused_moe": (FusedMoEFL, "FusedMoE"),  # noqa F405
     "unquantized_fused_moe_method": (
         UnquantizedFusedMoEMethodFL,  # noqa F405
         "UnquantizedFusedMoEMethod",
     ),
 }
-
 
 def register_oot_ops(whitelist: Optional[List[str]] = None) -> None:
     """
