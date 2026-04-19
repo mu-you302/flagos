@@ -42,6 +42,15 @@ dist_backend_dict = {
 }
 
 
+def _should_bypass_enforce_eager_for_cuda(platform_cls, model_config) -> bool:
+    return (
+        model_config is not None
+        and getattr(model_config, "enforce_eager", False) is True
+        and platform_cls.device_type == "cuda"
+        and platform_cls.vendor_name == "nvidia"
+    )
+
+
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
     device_info = DeviceInfo()
@@ -177,6 +186,15 @@ class PlatformFL(Platform):
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
+
+        if _should_bypass_enforce_eager_for_cuda(cls, model_config):
+            model_config.enforce_eager = False
+            if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            logger.info(
+                "Ignoring enforce_eager on NVIDIA CUDA to keep CUDA Graph "
+                "enabled for benchmarking and runtime execution."
+            )
 
         if (
             parallel_config.data_parallel_size > 1

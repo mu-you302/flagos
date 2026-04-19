@@ -11,6 +11,57 @@ from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 logger = logging.getLogger(__name__)
 
 
+def _should_bypass_enforce_eager_for_cuda_runtime() -> bool:
+    try:
+        import torch
+    except Exception:
+        return False
+
+    if not torch.cuda.is_available():
+        return False
+
+    if getattr(torch.version, "cuda", None) is None:
+        return False
+
+    if getattr(torch.version, "hip", None) is not None:
+        return False
+
+    try:
+        device_name = torch.cuda.get_device_name(0).lower()
+    except Exception:
+        return True
+
+    return "nvidia" in device_name or "geforce" in device_name or "rtx" in device_name
+
+
+def _patch_engine_args_for_cuda_graph() -> None:
+    if not _should_bypass_enforce_eager_for_cuda_runtime():
+        return
+
+    from vllm.engine.arg_utils import EngineArgs
+
+    if getattr(EngineArgs.create_model_config, "_fl_cuda_graph_patched", False):
+        return
+
+    original_create_model_config = EngineArgs.create_model_config
+
+    def create_model_config_with_cuda_graph(engine_args):
+        original_enforce_eager = engine_args.enforce_eager
+        if original_enforce_eager:
+            logger.info(
+                "Ignoring enforce_eager in EngineArgs on NVIDIA CUDA so "
+                "CUDA Graph remains enabled."
+            )
+            engine_args.enforce_eager = False
+        try:
+            return original_create_model_config(engine_args)
+        finally:
+            engine_args.enforce_eager = original_enforce_eager
+
+    create_model_config_with_cuda_graph._fl_cuda_graph_patched = True
+    EngineArgs.create_model_config = create_model_config_with_cuda_graph
+
+
 def __getattr__(name):
     if name == "distributed":
         import importlib
@@ -32,6 +83,7 @@ def _patch_transformers_compat():
 def register():
     """Register the FL platform."""
     _patch_transformers_compat()
+    _patch_engine_args_for_cuda_graph()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform

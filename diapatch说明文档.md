@@ -111,7 +111,7 @@ vllm_fl/dispatch/
 ├── config/                      # 平台特定配置
 │   ├── __init__.py             # 配置加载器
 │   ├── ascend.yaml             # Ascend NPU 默认配置
-│   └── cuda.yaml               # CUDA 默认配置
+│   └── nvidia.yaml               # CUDA 默认配置
 │
 └── backends/                    # 后端实现
     ├── base.py                 # 后端抽象基类
@@ -122,8 +122,7 @@ vllm_fl/dispatch/
     │       ├── activation.py    # 激活函数 (silu_and_mul, gelu_and_mul)
     │       ├── normalization.py # 归一化 (rms_norm)
     │       ├── rotary.py        # 旋转位置编码 (rotary_embedding)
-    │       ├── attention.py      # AttentionFLBackend, AttentionFLImpl
-    │       ├── mla.py           # 多头潜在注意力 (Qwen3.5)
+    │       ├── attention.py      # 实现了一个基于 FlashAttention 的 vLLM 注意力后端（AttentionFLBackend）
     │       └── custom_attention.py  # 注意力后端注册
     ├── reference/              # 参考后端 (PyTorch, 优先级 50)
     └── vendor/                 # 厂商特定后端 (优先级 100)
@@ -442,7 +441,7 @@ with with_strict_mode(True):
 ├─────────────────────────────────────────────────────┤
 │ 1. VLLM_FL_CONFIG  │ 用户配置文件 (完全覆盖)       │
 │ 2. 环境变量         │ 覆盖特定项                    │
-│ 3. 平台配置文件    │ ascend.yaml / cuda.yaml       │
+│ 3. 平台配置文件    │ ascend.yaml / nvidia.yaml       │
 │ 4. 内置默认值      │ 代码中定义的默认值            │
 └─────────────────────────────────────────────────────┘
 ```

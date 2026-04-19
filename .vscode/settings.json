@@ -1,4 +1,18 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "http.proxy": "http://127.0.0.1:10808",
+    "http.proxySupport": "override",
+    "http.noProxy": "localhost,127.0.0.1,::1",
+
+    "remote.SSH.remoteEnvironment": {
+        "HTTP_PROXY": "http://127.0.0.1:10808",
+        "HTTPS_PROXY": "http://127.0.0.1:10808",
+        "http_proxy": "http://127.0.0.1:10808",
+        "https_proxy": "http://127.0.0.1:10808",
+        "ALL_PROXY": "http://127.0.0.1:10808",
+        "all_proxy": "http://127.0.0.1:10808",
+        "NO_PROXY": "localhost,127.0.0.1,::1",
+        "no_proxy": "localhost,127.0.0.1,::1"
+    }
 }
