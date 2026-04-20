@@ -225,6 +225,19 @@ from vllm_fl.dispatch.io_dumper import (
 logger = init_logger(__name__)
 
 
+def _is_triton_fp8_kv_attention_layer(module: nn.Module) -> bool:
+    if not isinstance(module, (Attention, MLAAttention)):
+        return False
+
+    kv_cache_dtype = getattr(module, "kv_cache_dtype", "")
+    if not isinstance(kv_cache_dtype, str) or not kv_cache_dtype.startswith("fp8"):
+        return False
+
+    impl = getattr(module, "impl", None)
+    impl_module = getattr(impl.__class__, "__module__", "") if impl is not None else ""
+    return impl_module.endswith("vllm.v1.attention.backends.triton_attn")
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -695,6 +708,34 @@ class ModelRunnerFL(
                         param = getattr(module, attr)
                         if isinstance(param, torch.Tensor):
                             param.fill_(v_scale_val)
+
+                if _is_triton_fp8_kv_attention_layer(module):
+                    if hasattr(module, "_q_scale") and isinstance(module._q_scale, torch.Tensor):
+                        module._q_scale.fill_(1.0)
+                    if hasattr(module, "_q_scale_float"):
+                        module._q_scale_float = 1.0
+
+    def _normalize_triton_fp8_kv_q_scales(self) -> None:
+        if not self.cache_config.cache_dtype.startswith("fp8"):
+            return
+
+        normalized_layers = 0
+        for module in self.model.modules():
+            if not _is_triton_fp8_kv_attention_layer(module):
+                continue
+
+            if hasattr(module, "_q_scale") and isinstance(module._q_scale, torch.Tensor):
+                module._q_scale.fill_(1.0)
+            if hasattr(module, "_q_scale_float"):
+                module._q_scale_float = 1.0
+            normalized_layers += 1
+
+        if normalized_layers > 0:
+            logger.info(
+                "Normalized q_scale to 1.0 for %d Triton attention layers "
+                "using fp8 KV cache on NVIDIA CUDA.",
+                normalized_layers,
+            )
 
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
@@ -3627,6 +3668,7 @@ class ModelRunnerFL(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
+                self._normalize_triton_fp8_kv_q_scales()
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device

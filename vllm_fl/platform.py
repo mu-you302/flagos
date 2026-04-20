@@ -51,6 +51,15 @@ def _should_bypass_enforce_eager_for_cuda(platform_cls, model_config) -> bool:
     )
 
 
+def _should_enable_fp8_kv_cache_for_cuda(platform_cls, cache_config) -> bool:
+    return (
+        cache_config is not None
+        and getattr(cache_config, "cache_dtype", None) == "auto"
+        and platform_cls.device_type == "cuda"
+        and platform_cls.vendor_name == "nvidia"
+    )
+
+
 class PlatformFL(Platform):
     _enum = PlatformEnum.OOT
     device_info = DeviceInfo()
@@ -164,6 +173,15 @@ class PlatformFL(Platform):
                 logger.info("Setting kv cache block size to 64 for MUSA.")
             else:
                 cache_config.block_size = 16
+
+        if _should_enable_fp8_kv_cache_for_cuda(cls, cache_config):
+            cache_config.cache_dtype = "fp8"
+            cache_config.calculate_kv_scales = False
+            logger.info(
+                "Setting KV cache dtype to fp8 on NVIDIA CUDA. "
+                "Dynamic KV scale calculation is disabled to keep Triton "
+                "attention q_scale at 1.0."
+            )
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing

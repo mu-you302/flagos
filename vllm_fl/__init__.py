@@ -57,7 +57,6 @@ def _patch_engine_args_for_cuda_graph() -> None:
             return original_create_model_config(engine_args)
         finally:
             engine_args.enforce_eager = original_enforce_eager
-
     create_model_config_with_cuda_graph._fl_cuda_graph_patched = True
     EngineArgs.create_model_config = create_model_config_with_cuda_graph
 
@@ -83,7 +82,6 @@ def _patch_transformers_compat():
 def register():
     """Register the FL platform."""
     _patch_transformers_compat()
-    _patch_engine_args_for_cuda_graph()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
@@ -98,6 +96,8 @@ def register():
 
 def register_model():
     """Register the FL model."""
+    _patch_engine_args_for_cuda_graph()
+
     from vllm import ModelRegistry
     import vllm.model_executor.models.qwen3_next as qwen3_next_module
 
