@@ -36,6 +36,10 @@ logger = init_logger(__name__)
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
+QWEN3_4B_MODEL_MARKER = "qwen3-4b"
+QWEN3_4B_DEFAULT_MAX_NUM_BATCHED_TOKENS = 16384
+QWEN3_4B_OOM_FALLBACK_MAX_NUM_BATCHED_TOKENS = 12288
+
 dist_backend_dict = {
     "npu": "hccl",
     "cuda": "nccl",
@@ -57,6 +61,111 @@ def _should_enable_fp8_kv_cache_for_cuda(platform_cls, cache_config) -> bool:
         and getattr(cache_config, "cache_dtype", None) == "auto"
         and platform_cls.device_type == "cuda"
         and platform_cls.vendor_name == "nvidia"
+    )
+
+
+def _normalize_model_name(name: Optional[str]) -> str:
+    if not isinstance(name, str):
+        return ""
+    return name.strip().lower().replace("_", "-")
+
+
+def _get_model_type(model_config) -> Optional[str]:
+    if model_config is None:
+        return None
+
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    if hf_text_config is not None:
+        model_type = getattr(hf_text_config, "model_type", None)
+        if isinstance(model_type, str) and model_type:
+            return model_type
+
+    hf_config = getattr(model_config, "hf_config", None)
+    if hf_config is not None:
+        model_type = getattr(hf_config, "model_type", None)
+        if isinstance(model_type, str) and model_type:
+            return model_type
+
+    return None
+
+
+def _model_name_matches_qwen3_4b(model_name: Optional[str]) -> bool:
+    normalized_model_name = _normalize_model_name(model_name)
+    if not normalized_model_name:
+        return False
+    return QWEN3_4B_MODEL_MARKER in normalized_model_name
+
+
+def _dedupe_preserve_order(values: list[int]) -> list[int]:
+    deduped: list[int] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return deduped
+
+
+def set_scheduler_max_num_batched_tokens(scheduler_config, value: int) -> None:
+    scheduler_config.max_num_batched_tokens = value
+    scheduler_config.max_num_encoder_input_tokens = value
+    scheduler_config.encoder_cache_size = value
+
+
+def get_next_qwen3_4b_oom_fallback(candidates: list[int], current_value: int) -> Optional[int]:
+    try:
+        current_index = candidates.index(current_value)
+    except ValueError:
+        return None
+
+    next_index = current_index + 1
+    if next_index >= len(candidates):
+        return None
+    return candidates[next_index]
+
+
+def get_qwen3_4b_nvidia_batched_token_candidates(platform_cls, vllm_config) -> Optional[list[int]]:
+    if vllm_config is None:
+        return None
+
+    model_config = getattr(vllm_config, "model_config", None)
+    cache_config = getattr(vllm_config, "cache_config", None)
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+
+    if model_config is None or cache_config is None or scheduler_config is None:
+        return None
+
+    if platform_cls.vendor_name != "nvidia" or platform_cls.device_type != "cuda":
+        return None
+
+    user_provided = getattr(
+        scheduler_config, "_fl_user_provided_max_num_batched_tokens", None
+    )
+    if user_provided is None or user_provided is True:
+        return None
+
+    if _get_model_type(model_config) != "qwen3":
+        return None
+
+    if not _model_name_matches_qwen3_4b(getattr(model_config, "model", None)):
+        return None
+
+    kv_cache_dtype = getattr(cache_config, "cache_dtype", None)
+    if kv_cache_dtype not in {"auto", "fp8"}:
+        return None
+
+    upstream_default = getattr(
+        scheduler_config,
+        "_fl_upstream_default_max_num_batched_tokens",
+        None,
+    )
+    if upstream_default is None:
+        return None
+
+    return _dedupe_preserve_order(
+        [
+            QWEN3_4B_DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            QWEN3_4B_OOM_FALLBACK_MAX_NUM_BATCHED_TOKENS,
+            upstream_default,
+        ]
     )
 
 
@@ -158,6 +267,7 @@ class PlatformFL(Platform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
+        scheduler_config = vllm_config.scheduler_config
 
         parallel_config.worker_cls = "vllm_fl.worker.worker.WorkerFL"
 
@@ -181,6 +291,26 @@ class PlatformFL(Platform):
                 "Setting KV cache dtype to fp8 on NVIDIA CUDA. "
                 "Dynamic KV scale calculation is disabled to keep Triton "
                 "attention q_scale at 1.0."
+            )
+
+        qwen3_4b_batched_token_candidates = get_qwen3_4b_nvidia_batched_token_candidates(
+            cls, vllm_config
+        )
+        if qwen3_4b_batched_token_candidates:
+            selected_max_num_batched_tokens = qwen3_4b_batched_token_candidates[0]
+            set_scheduler_max_num_batched_tokens(
+                scheduler_config, selected_max_num_batched_tokens
+            )
+            setattr(
+                scheduler_config,
+                "_fl_qwen3_4b_batched_token_candidates",
+                qwen3_4b_batched_token_candidates,
+            )
+            logger.info(
+                "Using Qwen3-4B NVIDIA scheduler default max_num_batched_tokens=%d "
+                "(fallback order: %s).",
+                selected_max_num_batched_tokens,
+                qwen3_4b_batched_token_candidates[1:],
             )
 
         # TODO(lucas): handle this more gracefully

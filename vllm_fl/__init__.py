@@ -11,6 +11,14 @@ from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 logger = logging.getLogger(__name__)
 
 
+def _resolve_create_engine_config_usage_context(args, kwargs):
+    if "usage_context" in kwargs:
+        return kwargs["usage_context"]
+    if args:
+        return args[0]
+    return None
+
+
 def _should_bypass_enforce_eager_for_cuda_runtime() -> bool:
     try:
         import torch
@@ -61,6 +69,49 @@ def _patch_engine_args_for_cuda_graph() -> None:
     EngineArgs.create_model_config = create_model_config_with_cuda_graph
 
 
+def _patch_engine_args_for_scheduler_defaults() -> None:
+    from vllm.config import SchedulerConfig
+    from vllm.engine.arg_utils import EngineArgs
+
+    if getattr(EngineArgs.create_engine_config, "_fl_scheduler_defaults_patched", False):
+        return
+
+    original_create_engine_config = EngineArgs.create_engine_config
+
+    def create_engine_config_with_scheduler_metadata(engine_args, *args, **kwargs):
+        usage_context = _resolve_create_engine_config_usage_context(args, kwargs)
+        user_provided = engine_args.max_num_batched_tokens is not None
+        upstream_default = None
+
+        if not user_provided:
+            world_size = (
+                engine_args.pipeline_parallel_size
+                * engine_args.tensor_parallel_size
+            )
+            default_max_num_batched_tokens, _ = engine_args.get_batch_defaults(world_size)
+            upstream_default = default_max_num_batched_tokens.get(
+                usage_context,
+                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            )
+
+        vllm_config = original_create_engine_config(engine_args, *args, **kwargs)
+        scheduler_config = vllm_config.scheduler_config
+        setattr(
+            scheduler_config,
+            "_fl_user_provided_max_num_batched_tokens",
+            user_provided,
+        )
+        setattr(
+            scheduler_config,
+            "_fl_upstream_default_max_num_batched_tokens",
+            upstream_default,
+        )
+        return vllm_config
+
+    create_engine_config_with_scheduler_metadata._fl_scheduler_defaults_patched = True
+    EngineArgs.create_engine_config = create_engine_config_with_scheduler_metadata
+
+
 def __getattr__(name):
     if name == "distributed":
         import importlib
@@ -82,6 +133,7 @@ def _patch_transformers_compat():
 def register():
     """Register the FL platform."""
     _patch_transformers_compat()
+    _patch_engine_args_for_scheduler_defaults()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
@@ -97,6 +149,7 @@ def register():
 def register_model():
     """Register the FL model."""
     _patch_engine_args_for_cuda_graph()
+    _patch_engine_args_for_scheduler_defaults()
 
     from vllm import ModelRegistry
     import vllm.model_executor.models.qwen3_next as qwen3_next_module

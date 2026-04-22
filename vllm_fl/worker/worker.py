@@ -67,6 +67,10 @@ import vllm_fl.envs as fl_envs
 
 from vllm_fl.ops.custom_ops import register_oot_ops
 from vllm_fl.dispatch.io_common import managed_inference_mode
+from vllm_fl.platform import (
+    get_next_qwen3_4b_oom_fallback,
+    set_scheduler_max_num_batched_tokens,
+)
 from vllm_fl.utils import get_flag_gems_whitelist_blacklist
 
 logger = init_logger(__name__)
@@ -429,12 +433,60 @@ class WorkerFL(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
+    def _rebuild_model_runner_for_scheduler_retry(self) -> None:
+        old_model_runner = getattr(self, "model_runner", None)
+        if old_model_runner is not None and hasattr(old_model_runner, "model"):
+            del old_model_runner.model
+
+        gc.collect()
+        current_platform.empty_cache()
+
+        from vllm_fl.worker.model_runner import ModelRunnerFL
+
+        self.model_runner = ModelRunnerFL(self.vllm_config, self.device)
+
+    def _maybe_apply_qwen3_4b_oom_fallback(self, stage: str, exc: Exception) -> bool:
+        if "out of memory" not in str(exc).lower():
+            return False
+
+        candidates = getattr(
+            self.scheduler_config,
+            "_fl_qwen3_4b_batched_token_candidates",
+            None,
+        )
+        if not candidates:
+            return False
+
+        current_value = self.scheduler_config.max_num_batched_tokens
+        next_value = get_next_qwen3_4b_oom_fallback(candidates, current_value)
+        if next_value is None:
+            return False
+
+        logger.warning(
+            "Qwen3-4B hit OOM during %s with max_num_batched_tokens=%d. "
+            "Retrying with %d.",
+            stage,
+            current_value,
+            next_value,
+        )
+        set_scheduler_max_num_batched_tokens(self.scheduler_config, next_value)
+        self._rebuild_model_runner_for_scheduler_retry()
+        return True
+
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        ### TODO(lms): support manages a memory pool for device tensors.
-        self.model_runner.load_model(eep_scale_up=eep_scale_up)
-        # with self._maybe_get_memory_pool_context(tag="weights"):
-        #     self.model_runner.load_model(eep_scale_up=eep_scale_up)
+        while True:
+            try:
+                ### TODO(lms): support manages a memory pool for device tensors.
+                self.model_runner.load_model(eep_scale_up=eep_scale_up)
+                # with self._maybe_get_memory_pool_context(tag="weights"):
+                #     self.model_runner.load_model(eep_scale_up=eep_scale_up)
+                return
+            except Exception as exc:
+                if not self._maybe_apply_qwen3_4b_oom_fallback(
+                    "model loading", exc
+                ):
+                    raise
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -444,6 +496,17 @@ class WorkerFL(WorkerBase):
 
     @managed_inference_mode()
     def determine_available_memory(self) -> int:
+        while True:
+            try:
+                return self._determine_available_memory_once()
+            except Exception as exc:
+                if not self._maybe_apply_qwen3_4b_oom_fallback(
+                    "initial profiling", exc
+                ):
+                    raise
+                self.load_model()
+
+    def _determine_available_memory_once(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 

@@ -9,6 +9,10 @@ conda环境：conda activate flagos（其中vllm版本为0.13.0，已经安装�
 
 评测脚本：benchmarks/flagos_eval/run_benchmark.sh，核心逻辑是使用vllm bench throughput、vllm bench latency进行测试，输入长度主要有1k、4k、6k。
 
+throughput_chat_1k   : input=1024 tokens, output=1024 tokens, 300 prompts
+throughput_chat_4k   : input=4096 tokens, output=1024 tokens, 300 prompts
+throughput_chat_6k   : input=6144 tokens, output=1024 tokens, 300 prompts
+
 # NVIDIA RTX 4090 上的 Qwen3-4B 执行路由
 模型基本信息：
 Number of Layers: 36
@@ -113,8 +117,8 @@ TritonAttentionBackend 初始化
 对源码修改后，你可以在flagos这个环境下运行 test_vllm.py 进行测试，具体评测部分交给我来。
 
 # 参考文档
-./vllm_fl说明文档：./核心源码说明.md
-./vllm_fl/dispatch说明文档：./diapatch说明文档.md
+vllm_fl说明文档：./核心源码说明.md
+vllm_fl/dispatch说明文档：./diapatch说明文档.md
 
 如果你在工作过程中发现有重要信息未曾出现在已有文档中，将其加到文档中的合适位置并说明你做出的添加。
 
@@ -154,22 +158,39 @@ TritonAttentionBackend 初始化
 3. 设置`calculate_kv_scales=False`，避免 `TritonAttentionBackend` 出现 "A non 1.0 q_scale is not currently supported." 问题，可能导致一定的精度损失。
 4. 如果用户显式指定了其他 `cache_dtype`，本次逻辑不会覆盖；NPU / MUSA / 其他 vendor 也不受影响。
 
-================================================================================
-THROUGHPUT TEST RESULTS
-================================================================================
+测试结果（本次测试结果将 gpu_memory_utilization 设置为0.8，上面那个实验中为0.9，但是吞吐量还是有优势）
+### THROUGHPUT TEST RESULTS
 
-Scenario        Prompts  Tokens     Time(s)   Tokens/s     Req/s     
---------------------------------------------------------------------------------
-chat_1k         300      614400       123.7s     4966.6      2.43
-chat_4k         300      1536000      333.6s     4603.8      0.90
-chat_6k         300      2150400      524.6s     4099.4      0.57
---------------------------------------------------------------------------------
+| Scenario | Prompts | Tokens | Time(s) | Tokens/s | Req/s |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| chat_1k | 300 | 614400 | 123.7s | 4966.6 | 2.43 |
+| chat_4k | 300 | 1536000 | 333.6s | 4603.8 | 0.90 |
+| chat_6k | 300 | 2150400 | 524.6s | 4099.4 | 0.57 |
 
-================================================================================
-LATENCY TEST RESULTS
-================================================================================
+### LATENCY TEST RESULTS
 
-Scenario        Iters  Mean(ms)     P50(ms)      P90(ms)      P99(ms)     
---------------------------------------------------------------------------------
-batch_8         10     20571.62     20565.85     20731.11     20788.28    
---------------------------------------------------------------------------------
+| Scenario | Iters | Mean(ms) | P50(ms) | P90(ms) | P99(ms) |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| batch_8 | 10 | 20571.62 | 20565.85 | 20731.11 | 20788.28 |
+
+# 已完成改动——Qwen3-4B 的 PlatformFL 调度默认值与 OOM 回退
+1. 在 `vllm_fl/__init__.py` 中补充了 `EngineArgs.create_engine_config()` 的轻量 patch，给 `scheduler_config` 追加 `max_num_batched_tokens` 是否由用户显式设置、以及上游默认值来源这两个元信息。
+2. 在 `vllm_fl/platform.py` 中新增了 Qwen3-4B 专用调度默认值逻辑，仅在以下条件同时满足时生效：
+   - `vendor == nvidia`
+   - `device_type == cuda`
+   - `model_type == qwen3`
+   - 模型名命中 `Qwen3-4B`
+   - `kv_cache_dtype in {auto, fp8}`
+   - 用户未显式设置 `max_num_batched_tokens`
+3. 命中上述条件后，`PlatformFL.check_and_update_config()` 会将 `max_num_batched_tokens` 从当前上游默认值提升到 `16384`，同时同步更新 `max_num_encoder_input_tokens` 与 `encoder_cache_size`；`max_num_seqs` 保持不变。
+4. 在 `vllm_fl/worker/worker.py` 中新增了初始化阶段的 OOM 分级回退：
+   - 首选：`16384`
+   - 若模型加载或首轮 profile OOM：退到 `12288`
+   - 若仍 OOM：再退回上游默认值（当前 4090 / LLM_CLASS 路径下为 `8192`）
+   - 每次回退都会重建 `ModelRunnerFL`，避免沿用旧的 batch token 上限缓存。
+5. 目前实现采用“候选阶梯 + OOM 回退”的保守自适应方案，优先保证 Qwen3-4B 在 4090 + FP8 KV cache 路径上先尝试更高吞吐；后续如果要继续细化，可以在这个框架上接入显存大小、`gpu_memory_utilization`、`max_model_len` 等信息做更细粒度的首选值估算。
+
+补充了单元测试 `tests/unit_tests/test_qwen3_scheduler_defaults.py`，覆盖：
+   - Qwen3-4B 默认候选阶梯选择
+   - 显式设置 `max_num_batched_tokens` 时不改写默认值
+   - OOM 时的 `16384 -> 12288 -> 8192` 回退顺序
