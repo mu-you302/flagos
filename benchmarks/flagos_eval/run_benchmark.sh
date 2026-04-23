@@ -46,7 +46,7 @@ for scenario in "${!THROUGHPUT_SCENARIOS[@]}"; do
         --trust-remote-code \
         --dtype auto \
 		--enforce-eager \
-        --gpu_memory_utilization 0.9 \
+        --gpu_memory_utilization 0.8 \
         --output-json "${output_file}"
 
     echo "Saved: ${output_file}"
@@ -74,7 +74,7 @@ for scenario in "${!LATENCY_SCENARIOS[@]}"; do
         --trust-remote-code \
         --dtype auto \
 		--enforce-eager \
-        --gpu_memory_utilization 0.9 \
+        --gpu_memory_utilization 0.8 \
         --output-json "${output_file}"
 
     echo "Saved: ${output_file}"

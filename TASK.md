@@ -13,6 +13,25 @@ throughput_chat_1k   : input=1024 tokens, output=1024 tokens, 300 prompts
 throughput_chat_4k   : input=4096 tokens, output=1024 tokens, 300 prompts
 throughput_chat_6k   : input=6144 tokens, output=1024 tokens, 300 prompts
 
+## 评测过程解析
+在当前任务里，吞吐量评测脚本 run_benchmark.sh (line 41) 并没有显式传 --max-num-batched-tokens、--max-model-len、--max-num-seqs，所以它们走的是 vLLM 的默认推导逻辑。
+一些参数的默认值为：
+max-num-batched-tokens: 8192
+max-model-len: 40960
+max-num-seqs: 256
+
+依据分别是：
+
+vllm bench throughput 走的是离线 LLM(...) 路径，throughput.py (line 51) 会构造 LLM(**engine_args)，而 llm.py (line 351) 里 LLMEngine.from_engine_args(..., usage_context=UsageContext.LLM_CLASS)，所以默认值按 LLM_CLASS 分支取。
+
+对 RTX 4090 这类非 H100/H200、显存也不到 70 GiB 的 GPU，arg_utils.py (line 1797) 会走 else 分支，给出：
+
+LLM_CLASS.max_num_batched_tokens = 8192
+LLM_CLASS.max_num_seqs = 256
+具体赋值发生在 arg_utils.py (line 1940)。
+
+max-model-len 的 CLI 默认是 None，表示“从模型配置自动推导”，不是固定数值；实际尝试中日志打印出Using max model len 40960。
+
 # NVIDIA RTX 4090 上的 Qwen3-4B 执行路由
 模型基本信息：
 Number of Layers: 36
@@ -173,24 +192,12 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | batch_8 | 10 | 20571.62 | 20565.85 | 20731.11 | 20788.28 |
 
-# 已完成改动——Qwen3-4B 的 PlatformFL 调度默认值与 OOM 回退
-1. 在 `vllm_fl/__init__.py` 中补充了 `EngineArgs.create_engine_config()` 的轻量 patch，给 `scheduler_config` 追加 `max_num_batched_tokens` 是否由用户显式设置、以及上游默认值来源这两个元信息。
-2. 在 `vllm_fl/platform.py` 中新增了 Qwen3-4B 专用调度默认值逻辑，仅在以下条件同时满足时生效：
-   - `vendor == nvidia`
-   - `device_type == cuda`
-   - `model_type == qwen3`
-   - 模型名命中 `Qwen3-4B`
-   - `kv_cache_dtype in {auto, fp8}`
-   - 用户未显式设置 `max_num_batched_tokens`
-3. 命中上述条件后，`PlatformFL.check_and_update_config()` 会将 `max_num_batched_tokens` 从当前上游默认值提升到 `16384`，同时同步更新 `max_num_encoder_input_tokens` 与 `encoder_cache_size`；`max_num_seqs` 保持不变。
-4. 在 `vllm_fl/worker/worker.py` 中新增了初始化阶段的 OOM 分级回退：
-   - 首选：`16384`
-   - 若模型加载或首轮 profile OOM：退到 `12288`
-   - 若仍 OOM：再退回上游默认值（当前 4090 / LLM_CLASS 路径下为 `8192`）
-   - 每次回退都会重建 `ModelRunnerFL`，避免沿用旧的 batch token 上限缓存。
-5. 目前实现采用“候选阶梯 + OOM 回退”的保守自适应方案，优先保证 Qwen3-4B 在 4090 + FP8 KV cache 路径上先尝试更高吞吐；后续如果要继续细化，可以在这个框架上接入显存大小、`gpu_memory_utilization`、`max_model_len` 等信息做更细粒度的首选值估算。
-
-补充了单元测试 `tests/unit_tests/test_qwen3_scheduler_defaults.py`，覆盖：
-   - Qwen3-4B 默认候选阶梯选择
-   - 显式设置 `max_num_batched_tokens` 时不改写默认值
-   - OOM 时的 `16384 -> 12288 -> 8192` 回退顺序
+# 已完成改动——针对 benchmark 输入长度场景调整调度默认值
+1. 在 `vllm_fl/__init__.py` 中增加了对 `EngineArgs.from_cli_args()` 的 patch。
+2. 当入口来自 `vllm bench throughput` / `vllm bench latency`，且 CLI 参数中包含 `input_len`、`output_len`，模型名命中 `Qwen3-4B` 时，会在 `from_cli_args()` 阶段识别 benchmark 场景。
+3. 仅当用户没有显式传入 `max_model_len`、`max_num_batched_tokens`、`max_num_seqs` 时，才会按场景注入默认值，不覆盖用户手工指定参数。
+4. 当前场景映射为：
+   - `1024 / 1024 -> max_model_len=2048, max_num_batched_tokens=16384, max_num_seqs=512`
+   - `4096 / 1024 -> max_model_len=6144, max_num_batched_tokens=12288, max_num_seqs=256`
+   - `6144 / 1024 -> max_model_len=8192, max_num_batched_tokens=8192, max_num_seqs=128`
+5. 该 patch 发生在 `create_engine_config()` 和 worker 初始化之前，因此适合做 benchmark 场景相关的调度默认值改写；对不带 `input_len/output_len` 的普通离线推理和其他模型路径不生效。

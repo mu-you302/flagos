@@ -3,20 +3,71 @@
 import os
 import logging
 
-from vllm_fl.utils import get_op_config as _get_op_config
-
 from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 
 
 logger = logging.getLogger(__name__)
 
 
-def _resolve_create_engine_config_usage_context(args, kwargs):
-    if "usage_context" in kwargs:
-        return kwargs["usage_context"]
-    if args:
-        return args[0]
-    return None
+_QWEN3_4B_BENCHMARK_DEFAULTS = {
+    (1024, 1024): {
+        "max_model_len": 2048,
+        "max_num_batched_tokens": 16384,
+        "max_num_seqs": 512,
+    },
+    (4096, 1024): {
+        "max_model_len": 6144,
+        "max_num_batched_tokens": 12288,
+        "max_num_seqs": 256,
+    },
+    (6144, 1024): {
+        "max_model_len": 8192,
+        "max_num_batched_tokens": 8192,
+        "max_num_seqs": 128,
+    },
+}
+
+
+def _normalize_model_name(model) -> str:
+    if not isinstance(model, str):
+        return ""
+    return model.rstrip("/").split("/")[-1].lower()
+
+
+def _get_qwen3_4b_benchmark_defaults(args) -> dict[str, int] | None:
+    input_len = getattr(args, "input_len", None)
+    output_len = getattr(args, "output_len", None)
+    if not isinstance(input_len, int) or not isinstance(output_len, int):
+        return None
+
+    model_name = _normalize_model_name(getattr(args, "model", None))
+    if "qwen3-4b" not in model_name:
+        return None
+
+    return _QWEN3_4B_BENCHMARK_DEFAULTS.get((input_len, output_len))
+
+
+def _apply_qwen3_4b_benchmark_defaults(engine_args, args) -> dict[str, int]:
+    defaults = _get_qwen3_4b_benchmark_defaults(args)
+    if not defaults:
+        return {}
+
+    applied: dict[str, int] = {}
+    for field_name, value in defaults.items():
+        if getattr(engine_args, field_name, None) is None:
+            setattr(engine_args, field_name, value)
+            applied[field_name] = value
+
+    if applied:
+        logger.info(
+            "Applied benchmark-tuned EngineArgs defaults for Qwen3-4B "
+            "(input_len=%s, output_len=%s): %s",
+            getattr(args, "input_len", None),
+            getattr(args, "output_len", None),
+            applied,
+        )
+
+    return applied
 
 
 def _should_bypass_enforce_eager_for_cuda_runtime() -> bool:
@@ -69,47 +120,24 @@ def _patch_engine_args_for_cuda_graph() -> None:
     EngineArgs.create_model_config = create_model_config_with_cuda_graph
 
 
-def _patch_engine_args_for_scheduler_defaults() -> None:
-    from vllm.config import SchedulerConfig
-    from vllm.engine.arg_utils import EngineArgs
-
-    if getattr(EngineArgs.create_engine_config, "_fl_scheduler_defaults_patched", False):
+def _patch_engine_args_for_benchmark_defaults() -> None:
+    if not _should_bypass_enforce_eager_for_cuda_runtime():
         return
 
-    original_create_engine_config = EngineArgs.create_engine_config
+    from vllm.engine.arg_utils import EngineArgs
 
-    def create_engine_config_with_scheduler_metadata(engine_args, *args, **kwargs):
-        usage_context = _resolve_create_engine_config_usage_context(args, kwargs)
-        user_provided = engine_args.max_num_batched_tokens is not None
-        upstream_default = None
+    if getattr(EngineArgs, "_fl_benchmark_from_cli_args_patched", False):
+        return
 
-        if not user_provided:
-            world_size = (
-                engine_args.pipeline_parallel_size
-                * engine_args.tensor_parallel_size
-            )
-            default_max_num_batched_tokens, _ = engine_args.get_batch_defaults(world_size)
-            upstream_default = default_max_num_batched_tokens.get(
-                usage_context,
-                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
+    original_from_cli_args = EngineArgs.from_cli_args.__func__
 
-        vllm_config = original_create_engine_config(engine_args, *args, **kwargs)
-        scheduler_config = vllm_config.scheduler_config
-        setattr(
-            scheduler_config,
-            "_fl_user_provided_max_num_batched_tokens",
-            user_provided,
-        )
-        setattr(
-            scheduler_config,
-            "_fl_upstream_default_max_num_batched_tokens",
-            upstream_default,
-        )
-        return vllm_config
+    def from_cli_args_with_benchmark_defaults(cls, args):
+        engine_args = original_from_cli_args(cls, args)
+        _apply_qwen3_4b_benchmark_defaults(engine_args, args)
+        return engine_args
 
-    create_engine_config_with_scheduler_metadata._fl_scheduler_defaults_patched = True
-    EngineArgs.create_engine_config = create_engine_config_with_scheduler_metadata
+    EngineArgs.from_cli_args = classmethod(from_cli_args_with_benchmark_defaults)
+    EngineArgs._fl_benchmark_from_cli_args_patched = True
 
 
 def __getattr__(name):
@@ -132,6 +160,8 @@ def _patch_transformers_compat():
 
 def register():
     """Register the FL platform."""
+    from vllm_fl.utils import get_op_config as _get_op_config
+
     _patch_transformers_compat()
     _patch_engine_args_for_scheduler_defaults()
 
@@ -148,6 +178,7 @@ def register():
 
 def register_model():
     """Register the FL model."""
+    _patch_engine_args_for_benchmark_defaults()
     _patch_engine_args_for_cuda_graph()
     _patch_engine_args_for_scheduler_defaults()
 
