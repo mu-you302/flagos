@@ -39,12 +39,18 @@ def rotary_embedding_cuda(
     """
     from vllm._custom_ops import rotary_embedding as vllm_rotary_embedding
 
+    head_size = query.shape[-1]
+    cos_sin_cache = torch.cat((cos, sin), dim=-1)
+
+    # vLLM's CUDA op takes is_neox_style, while the dispatch interface uses
+    # rotary_interleaved. These are inverse conventions.
+    is_neox_style = not rotary_interleaved
     vllm_rotary_embedding(
         position_ids,
         query,
         key,
-        cos,
-        sin,
-        rotary_interleaved,
+        head_size,
+        cos_sin_cache,
+        is_neox_style,
     )
     return query, key

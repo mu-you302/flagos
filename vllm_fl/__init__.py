@@ -13,7 +13,8 @@ _QWEN3_4B_BENCHMARK_DEFAULTS = {
     (1024, 1024): {
         "max_model_len": 2056,
         "max_num_batched_tokens": 16384,
-        "max_num_seqs": 512,
+        # "max_num_seqs": 512,
+        "max_num_seqs": 384,
     },
     (4096, 1024): {
         "max_model_len": 5128,

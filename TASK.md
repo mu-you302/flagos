@@ -56,11 +56,12 @@ Qwen3-4B 推理流程 (RTX 4090 + vllm-plugin-FL)
 │  │
 │  ├─► 2. Grouped Query Attention
 │  │   ├─ Query/Key/Value Projection (标准 Linear)
+|  |   |
+|  |   |—— QK-Norm
 │  │   │
 │  │   ├─ Rotary Position Embedding
 │  │   │  └─ dispatch → call_op("rotary_embedding", query, key, cos, sin, positions)
 │  │   │     └─ RTX 4090 上选择: FlagGems 或 CUDA 优化实现
-│  │   │——QK-Norm
 |  |   |
 │  │   ├─ Attention Backend Selection
 │  │   │  └─ dispatch → call_op("attention_backend", use_mla=False, use_sparse=False)
@@ -215,3 +216,16 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 | Scenario | Iters | Mean(ms) | P50(ms) | P90(ms) | P99(ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **batch_8** | 10 | 17,449.57 | 17,159.61 | 17,554.77 | 20,222.88 |
+
+# 小算子性能比较
+实现方式：vllm_fl/dispatch/bench_small_ops.py，直接构造输入对算子进行测试。
+
+op	1024	4096	6144
+rms_norm	vendor 快 3.5x	vendor 快 2.9x	vendor 快 2.9x
+rms_norm_residual	vendor 快 2.9x	vendor 快 1.9x	基本持平，FlagOS 略快 0.6%
+silu_and_mul	vendor 快 5.1x	FlagOS 略快 1.6%	FlagOS 略快 1.4%
+rotary_embedding	vendor 快 2.5x	vendor 快 1.9x	FlagOS 快 2.2x
+
+结论：vendor CUDA 在小上下文明显更快，长上下文下部分算子 FlagOS 略优或明显优。
+
+因此，将rms_norm实现方式更改为vendor。

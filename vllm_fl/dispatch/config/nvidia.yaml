@@ -34,8 +34,8 @@ op_backends:
 
   # rms_norm: prioritize flaggems (Triton)
   rms_norm:
-    - flagos
     - vendor
+    - flagos
     - reference
 
   # silu_and_mul: prioritize flaggems

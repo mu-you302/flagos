@@ -525,6 +525,31 @@ Currently supported operators:
 | `rotary_embedding` | Rotary position embedding | ✓ | ✓ | ✓ |
 | `attention_backend` | Attention backend class path | ✓ | - | ✓ |
 
+## Small Operator Micro-Benchmark
+
+Use `vllm_fl.dispatch.bench_small_ops` to compare FlagOS and CUDA vendor
+implementations for the Qwen3-4B small dispatch operators without changing the
+`benchmarks/flagos_eval` scripts.
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python -m vllm_fl.dispatch.bench_small_ops \
+  --tokens 1024 4096 6144 \
+  --warmup 20 \
+  --iterations 100 \
+  --csv ./benchmarks/flagos_small_ops.csv
+```
+
+Defaults are loaded from
+`/data/xiyang/vllm-plugin-FL/Qwen3-4B/config.json`. The benchmark covers:
+
+- `rms_norm`: `[tokens, hidden_size]`, plus the fused residual path by default.
+- `silu_and_mul`: `[tokens, 2 * intermediate_size]`.
+- `rotary_embedding`: Q heads `[tokens, num_attention_heads, head_dim]` and KV
+  heads `[tokens, num_key_value_heads, head_dim]`.
+
+The printed comparison reports `vendor_ms/flagos_ms`; values greater than `1.0`
+mean the FlagOS implementation is faster for that operator/context.
+
 ## Selection Process
 
 1. **Cache Check**: Check if dispatch cache hits
