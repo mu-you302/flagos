@@ -11,17 +11,17 @@ logger = logging.getLogger(__name__)
 
 _QWEN3_4B_BENCHMARK_DEFAULTS = {
     (1024, 1024): {
-        "max_model_len": 2048,
+        "max_model_len": 2056,
         "max_num_batched_tokens": 16384,
         "max_num_seqs": 512,
     },
     (4096, 1024): {
-        "max_model_len": 6144,
+        "max_model_len": 5128,
         "max_num_batched_tokens": 12288,
         "max_num_seqs": 256,
     },
     (6144, 1024): {
-        "max_model_len": 8192,
+        "max_model_len": 7176,
         "max_num_batched_tokens": 8192,
         "max_num_seqs": 128,
     },
@@ -163,7 +163,6 @@ def register():
     from vllm_fl.utils import get_op_config as _get_op_config
 
     _patch_transformers_compat()
-    _patch_engine_args_for_scheduler_defaults()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
@@ -180,7 +179,6 @@ def register_model():
     """Register the FL model."""
     _patch_engine_args_for_benchmark_defaults()
     _patch_engine_args_for_cuda_graph()
-    _patch_engine_args_for_scheduler_defaults()
 
     from vllm import ModelRegistry
     import vllm.model_executor.models.qwen3_next as qwen3_next_module

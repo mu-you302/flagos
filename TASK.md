@@ -197,7 +197,21 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 2. 当入口来自 `vllm bench throughput` / `vllm bench latency`，且 CLI 参数中包含 `input_len`、`output_len`，模型名命中 `Qwen3-4B` 时，会在 `from_cli_args()` 阶段识别 benchmark 场景。
 3. 仅当用户没有显式传入 `max_model_len`、`max_num_batched_tokens`、`max_num_seqs` 时，才会按场景注入默认值，不覆盖用户手工指定参数。
 4. 当前场景映射为：
-   - `1024 / 1024 -> max_model_len=2048, max_num_batched_tokens=16384, max_num_seqs=512`
-   - `4096 / 1024 -> max_model_len=6144, max_num_batched_tokens=12288, max_num_seqs=256`
-   - `6144 / 1024 -> max_model_len=8192, max_num_batched_tokens=8192, max_num_seqs=128`
+   - `1024 / 1024 -> max_model_len=2056, max_num_batched_tokens=16384, max_num_seqs=512`
+   - `4096 / 1024 -> max_model_len=5128, max_num_batched_tokens=12288, max_num_seqs=256`
+   - `6144 / 1024 -> max_model_len=7176, max_num_batched_tokens=8192, max_num_seqs=128`
 5. 该 patch 发生在 `create_engine_config()` 和 worker 初始化之前，因此适合做 benchmark 场景相关的调度默认值改写；对不带 `input_len/output_len` 的普通离线推理和其他模型路径不生效。
+
+### THROUGHPUT TEST RESULTS
+
+| Scenario | Prompts | Tokens | Time(s) | Tokens/s | Req/s |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **chat_1k** | 300 | 614,400 | 115.1 | 5,336.4 | 2.61 |
+| **chat_4k** | 300 | 1,536,000 | 292.3 | 5,254.5 | 1.03 |
+| **chat_6k** | 300 | 2,150,400 | 417.7 | 5,148.2 | 0.72 |
+
+### LATENCY TEST RESULTS
+
+| Scenario | Iters | Mean(ms) | P50(ms) | P90(ms) | P99(ms) |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **batch_8** | 10 | 17,449.57 | 17,159.61 | 17,554.77 | 20,222.88 |
