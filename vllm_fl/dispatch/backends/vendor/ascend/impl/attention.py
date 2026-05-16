@@ -548,6 +548,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         """Get parameters for fused_infer_attention."""
         block_size = 128
+
+        # 动态计算 kv 的隐藏层维度
+        kv_hidden_size = self.num_kv_heads * self.head_size
+
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_table = None
             actual_seq_lengths_kv = attn_metadata.actual_seq_lengths_q
@@ -559,19 +563,77 @@ class AscendAttentionBackendImpl(AttentionImpl):
             value = self.value_cache.view(num_block, block_size, -1)
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            key = self.key_cache.view(-1, block_size, 256)
-            value = self.value_cache.view(-1, block_size, 256)
+            # key = self.key_cache.view(-1, block_size, 256)
+            # value = self.value_cache.view(-1, block_size, 256)
+            key = self.key_cache.view(-1, block_size, kv_hidden_size)
+            value = self.value_cache.view(-1, block_size, kv_hidden_size)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
         else:
             # ChunkedPrefill
             # num_block, block_size, _, _ = self.key_cache.shape
-            key = self.key_cache.view(-1, block_size, 256)
-            value = self.value_cache.view(-1, block_size, 256)
+            # key = self.key_cache.view(-1, block_size, 256)
+            # value = self.value_cache.view(-1, block_size, 256)
+            key = self.key_cache.view(-1, block_size, kv_hidden_size)
+            value = self.value_cache.view(-1, block_size, kv_hidden_size)
             block_table = attn_metadata.block_tables
             actual_seq_lengths_kv = attn_metadata.seq_lens_list
 
         return key, value, block_size, block_table, actual_seq_lengths_kv
+
+    def _expand_kv_for_gqa(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Expand key and value tensors for GQA (Grouped Query Attention).
+
+        For GQA models where num_kv_heads < num_heads, the key and value
+        tensors need to be expanded to match the number of query heads
+        before calling npu_fused_infer_attention_score.
+
+        Args:
+            key: Key tensor of shape [num_tokens, num_kv_heads, head_size]
+            value: Value tensor of shape [num_tokens, num_kv_heads, head_size]
+
+        Returns:
+            Expanded key and value tensors of shape [num_tokens, num_heads, head_size]
+        """
+        if self.num_kv_heads == self.num_heads:
+            # MHA, no expansion needed
+            return key, value
+
+        if self.num_kv_heads > self.num_heads:
+            # When num_kv_heads > num_heads (e.g., MQA or special configs),
+            # we should not expand. The npu_fused_infer_attention_score operator
+            # can handle this case directly.
+            return key, value
+
+        # Only expand when num_kv_heads < num_heads and num_heads is divisible by num_kv_heads
+        if self.num_heads % self.num_kv_heads != 0:
+            logger.warning(
+                f"num_heads ({self.num_heads}) is not divisible by num_kv_heads "
+                f"({self.num_kv_heads}). Skipping GQA expansion."
+            )
+            return key, value
+
+        # Calculate repeat factor
+        repeat_factor = self.num_heads // self.num_kv_heads
+
+        # Expand key: [num_tokens, num_kv_heads, head_size] -> [num_tokens, num_heads, head_size]
+        key_shape = key.shape
+        key = key.unsqueeze(2).expand(-1, -1, repeat_factor, -1).reshape(
+            key_shape[0], self.num_heads, key_shape[2]
+        )
+
+        # Expand value: [num_tokens, num_kv_heads, head_size] -> [num_tokens, num_heads, head_size]
+        value_shape = value.shape
+        value = value.unsqueeze(2).expand(-1, -1, repeat_factor, -1).reshape(
+            value_shape[0], self.num_heads, value_shape[2]
+        )
+
+        return key, value
 
     def reshape_and_cache(
         self,
@@ -617,6 +679,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             key = key[:num_tokens]
             value = value[:num_tokens]
+
+        # Expand key and value for GQA models
+        # npu_fused_infer_attention_score requires key/value to have the same
+        # number of heads as query for proper shape calculation
+        # key, value = self._expand_kv_for_gqa(key, value)
 
         # Determine sparse_mode based on mask availability
         # sparse_mode=3 requires attn_mask; sparse_mode=0 does not
@@ -772,7 +839,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return output.fill_(0)
 
         # Reshape and cache KV
-        if attn_metadata != AscendAttentionState.DecodeOnly:
+        # if attn_metadata != AscendAttentionState.DecodeOnly:  # 原始这个比较恒真
+        if attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
             kv_cache = [i.contiguous() for i in kv_cache]
         if key is not None and value is not None:
             key = key.contiguous()
