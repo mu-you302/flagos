@@ -32,6 +32,8 @@ LLM_CLASS.max_num_seqs = 256
 
 max-model-len 的 CLI 默认是 None，表示“从模型配置自动推导”，不是固定数值；实际尝试中日志打印出Using max model len 40960。
 
+> 如果是H100，参数默认值为16384，max_num_seqs=1024。而A100是8192, 256
+
 # NVIDIA RTX 4090 上的 Qwen3-4B 执行路由
 模型基本信息：
 Number of Layers: 36
@@ -172,6 +174,12 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 |------|----------|-------------|-----------------|----------------|----------------|----------------|
 | latency | batch_8 | 10 | 19526.76 | 19520.42 | 19557.64 | 19561.54 |
 
+# 模型权重量化
+vLLM 0.13.0 支持 BF16 → FP8 在线量化：--quantization fp8
+
+在插件框架中 patch 量化参数。量化之后，底层 GEMM 算子使用的是 W8A8 版本，计算速度更快。
+
+
 # 已完成改动——针对 CUDA 默认启用 FP8 KV cache
 1. 在 `vllm_fl/platform.py` 中增加了仅针对 `NVIDIA CUDA` 的 KV cache dtype 默认改写逻辑。
 2. 当 `cache_dtype` 仍为 `auto` 时，CUDA 路径会自动切换为 `fp8`，从而让当前 Qwen3-4B 的 `TritonAttentionBackend` 走上游已支持的 FP8 KV cache 路径。
@@ -217,15 +225,14 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 | :--- | :---: | :---: | :---: | :---: | :---: |
 | **batch_8** | 10 | 17,449.57 | 17,159.61 | 17,554.77 | 20,222.88 |
 
-# 小算子性能比较
-实现方式：vllm_fl/dispatch/bench_small_ops.py，直接构造输入对算子进行测试。
+# 算子选择
+当前算子默认优先级为 flagos > vendor，但是对于小算子，使用cuda原生实现可能更优。
 
-op	1024	4096	6144
-rms_norm	vendor 快 3.5x	vendor 快 2.9x	vendor 快 2.9x
-rms_norm_residual	vendor 快 2.9x	vendor 快 1.9x	基本持平，FlagOS 略快 0.6%
-silu_and_mul	vendor 快 5.1x	FlagOS 略快 1.6%	FlagOS 略快 1.4%
-rotary_embedding	vendor 快 2.5x	vendor 快 1.9x	FlagOS 快 2.2x
+USE_FLAGGEMS=1 + VLLM_FL_FLAGOS_WHITELIST=attention_backend
 
-结论：vendor CUDA 在小上下文明显更快，长上下文下部分算子 FlagOS 略优或明显优。
+为了保留 fp8 KV cache 可用性，将 attention_backend 加入到白名单中，否则 vendor 会切到 FlashAttentionBackend。
 
-因此，将rms_norm实现方式更改为vendor。
+case	baseline	B	提升
+chat_6k	5607.64	5794.37	+3.33%
+chat_1k	6288.87	6412.92	+1.97%
+chat_4k	5867.28	5993.56	+2.15%

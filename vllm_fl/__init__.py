@@ -120,6 +120,19 @@ def _patch_engine_args_for_cuda_graph() -> None:
     create_model_config_with_cuda_graph._fl_cuda_graph_patched = True
     EngineArgs.create_model_config = create_model_config_with_cuda_graph
 
+def _apply_cuda_quantization_default(engine_args) -> bool:
+    if not _should_bypass_enforce_eager_for_cuda_runtime():
+        return False
+
+    if not hasattr(engine_args, "quantization"):
+        return False
+
+    if getattr(engine_args, "quantization", None) is not None:
+        return False
+
+    engine_args.quantization = "fp8"
+    logger.info("Setting quantization to fp8 by default on NVIDIA CUDA.")
+    return True
 
 def _patch_engine_args_for_benchmark_defaults() -> None:
     if not _should_bypass_enforce_eager_for_cuda_runtime():
@@ -135,11 +148,22 @@ def _patch_engine_args_for_benchmark_defaults() -> None:
     def from_cli_args_with_benchmark_defaults(cls, args):
         engine_args = original_from_cli_args(cls, args)
         _apply_qwen3_4b_benchmark_defaults(engine_args, args)
+        _apply_cuda_quantization_default(engine_args)
         return engine_args
 
     EngineArgs.from_cli_args = classmethod(from_cli_args_with_benchmark_defaults)
     EngineArgs._fl_benchmark_from_cli_args_patched = True
 
+def _apply_cuda_flaggems_attention_defaults() -> None:
+    if not _should_bypass_enforce_eager_for_cuda_runtime():
+        return
+
+    os.environ.setdefault("USE_FLAGGEMS", "1")
+    if (
+        "VLLM_FL_FLAGOS_WHITELIST" not in os.environ
+        and "VLLM_FL_FLAGOS_BLACKLIST" not in os.environ
+    ):
+        os.environ["VLLM_FL_FLAGOS_WHITELIST"] = "attention_backend"
 
 def __getattr__(name):
     if name == "distributed":
@@ -164,6 +188,7 @@ def register():
     from vllm_fl.utils import get_op_config as _get_op_config
 
     _patch_transformers_compat()
+    _apply_cuda_flaggems_attention_defaults()
 
     # Model-specific platform patches
     from vllm_fl.patches.glm_moe_dsa import apply_platform_patches as glm5_platform
