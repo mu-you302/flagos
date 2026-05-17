@@ -174,6 +174,66 @@ vllm_fl/dispatch说明文档：./diapatch说明文档.md
 |------|----------|-------------|-----------------|----------------|----------------|----------------|
 | latency | batch_8 | 10 | 19526.76 | 19520.42 | 19557.64 | 19561.54 |
 
+## 图编译 / CUDA Graph capture size A/B 中间结论
+
+为了判断 CUDA Graph 是否仍有可优化空间，新增了仅用于实验的统计与配置开关：
+
+1. `VLLM_FL_CUDAGRAPH_STATS=1`：统计 runtime dispatch 到 `FULL` / `PIECEWISE` / `NONE` 的分布，并记录 batch descriptor、raw tokens、padded tokens、padding 等信息。
+2. `VLLM_FL_CUDAGRAPH_CAPTURE_SIZES`：直接覆盖 `cudagraph_capture_sizes`。
+3. `VLLM_FL_CUDAGRAPH_CAPTURE_SIZES_BY_MAX_MODEL_LEN`：按 benchmark 场景的 `max_model_len` 分别覆盖 capture sizes，例如 `2056` 对应 chat_1k，`5128` 对应 chat_4k / batch_8，`7176` 对应 chat_6k。
+
+统计运行目录：
+
+`ab_results/cudagraph_capture_sizes_20260516_194932/default_stats/cg_stats.jsonl`
+
+在原始 capture size 配置下，CUDA Graph dispatch 命中率如下：
+
+| 场景 | max_model_len | total steps | hit rate | FULL | PIECEWISE | NONE | 主要 fallback |
+|------|---------------|-------------|----------|------|-----------|------|---------------|
+| chat_1k | 2056 | 1577 | 98.03% | 1546 | 0 | 31 | mixed prefill，常见 raw tokens 包括 1024、4097、16384 |
+| chat_4k | 5128 | 3526 | 96.03% | 3386 | 0 | 140 | mixed prefill，主要 raw tokens=12288 |
+| chat_6k | 7176 | 5150 | 94.82% | 4883 | 0 | 267 | mixed prefill，主要 raw tokens=8192 |
+| batch_8 latency | 5128 | 20541 | 99.61% | 20460 | 1 | 80 | 少量 mixed prefill，decode 基本全命中 |
+
+中间结论：
+
+1. 默认 capture sizes 对 decode 已经很有效，decode 阶段基本都走 `FULL` CUDA Graph。
+2. 主要 fallback 不在 decode，而在大 batch 的 mixed prefill / chunked prefill。
+3. 因此单纯提高 decode 小 batch capture sizes 没有意义；如果继续优化 CUDA Graph，目标应该是 mixed prefill 的大 batch descriptor。
+
+基于上面的 fallback 分布，尝试过给不同 benchmark 场景追加大 prefill capture sizes：
+
+| 场景 | 默认 capture sizes | 候选追加的大 prefill sizes |
+|------|--------------------|----------------------------|
+| chat_1k | 1..512 | 1024, 4096, 8192, 16384 |
+| chat_4k / batch_8 | 1..512 | 4096, 4106, 8192, 12288 |
+| chat_6k | 1..256 | 6144, 8192 |
+
+无 stats 开销 A/B 结果：
+
+| 场景 | baseline | large-prefill candidate | 变化 |
+|------|----------|-------------------------|------|
+| chat_1k tokens/s | 7386.15 | 7336.15 | -0.68% |
+| chat_4k tokens/s | 6984.64 | 6925.65 | -0.85% |
+| chat_6k tokens/s | 6610.78 | 6555.58 | -0.84% |
+| batch_8 mean latency | 12834.96 ms | 12758.72 ms | -0.59% |
+
+该候选不应采用。原因是 vLLM 的 `pad_for_cudagraph()` 会把两个 capture size 之间的 batch size pad 到下一个 capture size。直接追加 6144 / 8192 / 12288 / 16384 后，很多 mixed prefill step 会被 pad 到大图执行，额外计算量抵消甚至超过 CUDA Graph replay 收益。图捕获显存也明显增加，例如：
+
+| 场景 | baseline graph memory | large-prefill candidate graph memory |
+|------|-----------------------|--------------------------------------|
+| chat_6k | 0.37 GiB | 1.26 GiB |
+| chat_1k | 0.61 GiB | 2.41 GiB |
+| chat_4k | 0.57 GiB | 1.91 GiB |
+| batch_8 | 0.57 GiB | 1.91 GiB |
+
+最终结论：
+
+1. 当前默认 CUDA Graph capture size 配置已经能覆盖绝大多数 decode step。
+2. mixed prefill fallback 虽然存在，但直接扩大 `cudagraph_capture_sizes` 是负收益。
+3. 后续如果继续做图编译优化，应实现“large mixed-prefill exact-match / low-padding 策略”：只有 raw token 数精确命中，或 padding 足够小，才走大 prefill CUDA Graph；否则保持当前 fallback 路径。
+4. 因此现阶段保留默认 capture sizes，不启用大 prefill capture size override。
+
 # 模型权重量化
 vLLM 0.13.0 支持 BF16 → FP8 在线量化：--quantization fp8
 
