@@ -5,6 +5,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import os
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -23,6 +24,13 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+
+def _env_flag_enabled(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
 
 
 def weak_ref_tensors(tensor: Any) -> Any:
@@ -74,6 +82,9 @@ class GraphWrapper:
 
         self.first_run_finished = False
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.sync_before_replay = _env_flag_enabled(
+            "VLLM_FL_CUDAGRAPH_REPLAY_SYNC", False
+        )
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
         # need to initialize a CUDAGraphWrapper.
@@ -197,6 +208,7 @@ class GraphWrapper:
                 f"got {new_input_addresses}"
             )
 
-        current_platform.torch_device_fn.synchronize()
+        if self.sync_before_replay:
+            current_platform.torch_device_fn.synchronize()
         entry.graph.replay()
         return entry.output

@@ -296,3 +296,35 @@ case	baseline	B	提升
 chat_6k	5607.64	5794.37	+3.33%
 chat_1k	6288.87	6412.92	+1.97%
 chat_4k	5867.28	5993.56	+2.15%
+
+## 注意力后端
+
+本次在 `vllm_fl/dispatch/backends/flaggems/flaggems.py` 中给 `attention_backend` 增加可选路由：
+
+- `VLLM_FL_ATTENTION_BACKEND=flashinfer|triton`
+- 当前默认值改为 `flashinfer`。
+- 如需恢复之前行为，可设置 `VLLM_FL_ATTENTION_BACKEND=triton`。
+
+A/B 结果目录：
+
+`ab_results/bench_feature_ab_20260517_153052/summary.md`
+
+本次 A/B 使用原始评测脚本，不改动 `benchmarks/flagos_eval/run_benchmark.sh`。关键对比为：
+
+| case | `VLLM_FL_ATTENTION_BACKEND` |
+|------|-----------------------------|
+| baseline_triton | triton |
+| flashinfer | flashinfer |
+
+### A/B 结果
+
+| case | chat_1k tok/s | delta | chat_4k tok/s | delta | chat_6k tok/s | delta | throughput geomean | delta | mean latency ms | delta |
+|------|--------------:|------:|--------------:|------:|--------------:|------:|-------------------:|------:|----------------:|------:|
+| baseline_triton | 7401.055 | +0.000% | 6999.632 | +0.000% | 6621.584 | +0.000% | 7000.196 | +0.000% | 12754.595 | +0.000% |
+| flashinfer | 7356.576 | -0.601% | 7184.950 | +2.648% | 6759.600 | +2.084% | 7095.889 | +1.367% | 12953.822 | +1.562% |
+
+结论：
+
+1. `FlashInferBackend` 是本次主要收益来源：`chat_4k` 提升 `+2.648%`，`chat_6k` 提升 `+2.084%`，但 `chat_1k` 回退 `-0.601%`。这与 profiling 结论一致：输入越长，attention CUDA 时间占比越高，替换 attention backend 越有效。
+2. 因此当前默认代码路径采用 `FlashInfer attention`；如果后续发现短上下文 `chat_1k` 权重更重要，可以通过 `VLLM_FL_ATTENTION_BACKEND=triton` 回退到 Triton，或做按场景选择。
+3. `FlashInferBackend` 在RTX 4090上验证有效，但是提交到赛题官网结果表明收益不大，可能是因为GPU架构等硬件条件不同，因此提交版本中并没有启用这种优化方式。
