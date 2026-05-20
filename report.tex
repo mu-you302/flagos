@@ -1,0 +1,410 @@
+\documentclass[UTF8,10.5pt]{ctexart}
+
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0.25em}
+\renewcommand{\arraystretch}{1.15}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\up}{\ensuremath{\uparrow}}
+\newcommand{\down}{\ensuremath{\downarrow}}
+
+\title{\heiti 基于FlagOS多硬件体系的Qwen3-4B大模型推理吞吐性能优化}
+\author{邓郗阳\\华中科技大学\\\texttt{xydeng805@hust.edu.cn}}
+\date{2026年5月}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+本文面向 FlagOS 推理框架下 Qwen3-4B 模型的离线推理吞吐优化问题，研究在不修改赛题评测脚本、保持模型精度约束并避免明显延迟劣化的条件下，如何提升固定硬件环境中的推理吞吐。针对原始配置在 NVIDIA RTX 4090 上存在的 CUDA Graph 被 \code{enforce\_eager} 关闭、KV Cache 显存占用偏高、调度参数与固定长度 benchmark 不匹配、小算子后端选择不稳定等问题，本文从执行图恢复、KV Cache 压缩、场景化调度默认值、算子后端白名单和投机解码验证五个方向进行系统优化。同时，本文也针对 Ascend 910C 路径实现了基于 \code{torch.npu.NPUGraph} 的 \code{FULL\_DECODE\_ONLY} 图捕获，补齐 \code{enforce\_eager} 绕过、NPU 本地图捕获、paged attention task update 和长上下文 workspace 等关键工程问题。实验结果表明，性能优先方案在本地 RTX 4090 环境中将 \code{chat\_1k}、\code{chat\_4k}、\code{chat\_6k} 的吞吐分别由 3840.62、3088.80、2912.25 tokens/s 提升至 7391.72、6984.57、6588.81 tokens/s，几何平均吞吐提升 114.33\%；\code{batch\_8} 平均延迟由 66482.55 ms 降至 12769.15 ms，延迟降低 80.79\%。精度评测显示，性能优先方案在 GSM8K、HumanEval 和 MBPP 上相对变化均在 2\% 以内，但 BBH 与中文 MGSM 回退较大，六项主任务宏平均相对 baseline 下降 2.76\%。因此，当前结果揭示了吞吐与精度之间的主要权衡：执行路径恢复和显存压缩能显著提升吞吐，但 FP8 KV Cache 等近似路径仍需要精度安全开关或更细粒度策略；Ascend 图捕获路径已经可正确运行，但吞吐收益不明显，最终提交版未将其作为默认启用项。
+\end{abstract}
+
+\noindent{\heiti 关键词：}FlagOS；vLLM；Qwen3-4B；大模型推理；CUDA Graph；Ascend NPU；KV Cache；吞吐优化
+
+\section{引言}
+
+随着千亿参数级大模型在真实业务中快速落地，大模型推理系统需要在有限显存、有限计算资源和严格服务时延约束下处理持续增长的请求规模。对于自回归大语言模型而言，推理过程通常同时受到 GEMM 计算、Attention 访存、KV Cache 显存占用、调度粒度和 kernel launch 开销的影响。因此，单点算子优化往往不足以取得稳定收益，系统层面的执行路径、显存管理和调度策略需要协同设计。
+
+本报告面向 FLAGOS 开放计算全球挑战赛赛道二的 Qwen3-4B 推理优化任务。赛题要求在保持模型精度的基础上提升 Throughput，同时保证时延不能明显差于 baseline。评测框架固定为 FlagOS 与 vLLM 插件体系，评测脚本固定为 \code{benchmarks/flagos\_eval/run\_benchmark.sh}，参赛者可修改范围主要集中在 \code{vllm\_fl} 源码。因此，本文的优化目标不是改变 benchmark 协议，而是在既有 FlagOS 路径中恢复或打开适合该 workload 的高性能执行能力。
+
+本文的主要工作包括五个方面。第一，恢复 NVIDIA CUDA 上被评测参数关闭的 CUDA Graph 执行路径，减少 decode 阶段的动态调度和 kernel launch 开销。第二，在 CUDA 路径默认启用 FP8 KV Cache，以降低长上下文推理中的显存压力并提高可并发请求数。第三，根据赛题固定输入长度注入更紧凑的 \code{max\_model\_len}、\code{max\_num\_batched\_tokens} 和 \code{max\_num\_seqs}，避免上游默认配置对本任务过于保守。第四，针对 Ascend 910C 实现 \code{FULL\_DECODE\_ONLY} NPU 图捕获，并验证其正确性和工程边界。第五，对算子后端、large-prefill CUDA Graph、TorchInductor autotune、Ascend 图捕获和 draft-model 投机解码进行消融验证，保留正收益路径并明确不采用负收益方案。
+
+\section{评测任务与系统基线}
+
+\subsection{模型与硬件环境}
+
+本次优化对象为 Qwen3-4B~\cite{qwen3} 模型。推理框架为 vLLM 0.13.0 与 FlagOS 插件体系~\cite{flagos}，运行环境为 \code{flagos} conda 环境。本文的完整吞吐和精度数值主要来自 NVIDIA RTX 4090；同时，在 Ascend 910C 上进行了图捕获、Ascend native attention、C8 KV Cache 等硬件相关实现和验证。Qwen3-4B 使用 36 层 Transformer 结构，并采用 Grouped Query Attention，其中 Query head 数为 32，Key/Value head 数为 8。
+
+\subsection{评测场景}
+
+赛题评测脚本通过 \code{vllm bench throughput} 和 \code{vllm bench latency} 对离线推理进行测试。吞吐测试包含三组固定长度场景，均使用 300 条 prompt，输出长度均为 1024 tokens；延迟测试使用 \code{batch\_8} 场景。表~\ref{tab:scenarios} 给出本文使用的主要评测场景。
+
+\begin{table}[H]
+\centering
+\caption{评测场景设置}
+\label{tab:scenarios}
+\begin{tabular}{lrrrr}
+\toprule
+场景 & 输入长度 & 输出长度 & 请求数 & 统计指标 \\
+\midrule
+\code{chat\_1k} & 1024 & 1024 & 300 & tokens/s, req/s \\
+\code{chat\_4k} & 4096 & 1024 & 300 & tokens/s, req/s \\
+\code{chat\_6k} & 6144 & 1024 & 300 & tokens/s, req/s \\
+\code{batch\_8} & 4096 & 1024 & 10轮 & mean/p50/p90/p99 latency \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+原始评测脚本没有显式传入 \code{max\_num\_batched\_tokens}、\code{max\_model\_len} 和 \code{max\_num\_seqs}。在 RTX 4090 上，vLLM 的 \code{LLM\_CLASS} 默认值会将 \code{max\_num\_batched\_tokens} 设为 8192，将 \code{max\_num\_seqs} 设为 256，而 \code{max\_model\_len} 从模型配置推导为 40960。该配置更偏向通用长上下文能力，对本赛题固定长度输入而言显存预留过大，导致可并发请求数和调度效率受到限制。
+
+\subsection{Baseline 性能}
+
+原始代码库在本地 RTX 4090 上的 baseline 结果如表~\ref{tab:baseline-throughput} 和表~\ref{tab:baseline-latency} 所示。可以看到，随着输入长度从 1k 增加到 6k，总吞吐从 3840.62 tokens/s 下降到 2912.25 tokens/s，说明长上下文下 KV Cache 和 Attention 开销已经成为重要瓶颈。
+
+\begin{table}[H]
+\centering
+\caption{Baseline 吞吐性能}
+\label{tab:baseline-throughput}
+\begin{tabular}{lrrrr}
+\toprule
+场景 & 请求数 & 总 token 数 & 耗时(s) & 吞吐(tokens/s) \\
+\midrule
+\code{chat\_1k} & 300 & 614400 & 159.97 & 3840.62 \\
+\code{chat\_4k} & 300 & 1536000 & 497.28 & 3088.80 \\
+\code{chat\_6k} & 300 & 2150400 & 738.40 & 2912.25 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Baseline 延迟性能}
+\label{tab:baseline-latency}
+\begin{tabular}{lrrrr}
+\toprule
+场景 & 平均延迟(ms) & P50(ms) & P90(ms) & P99(ms) \\
+\midrule
+\code{batch\_8} & 66482.55 & 66038.95 & 67228.57 & 67254.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{瓶颈分析}
+
+\subsection{FlagOS 执行路径}
+
+Qwen3-4B 在 FlagOS 上的核心执行路径如图~\ref{fig:route} 所示。每个 Transformer block 包含 RMSNorm、QKV projection、RoPE、Grouped Query Attention、输出投影和 MLP。对于本模型，NVIDIA 路径中的 \code{attention\_backend} 经 FlagOS dispatch 后进入 vLLM 原生 \code{TritonAttentionBackend}，RMSNorm、RoPE 和 \code{silu\_and\_mul} 等小算子可经 FlagGems 或 vendor CUDA 路径执行；Ascend 路径则需要使用 \code{torch\_npu} 的 fused infer attention、paged attention 和 reshape-and-cache 算子补齐 native attention 后端。
+
+\begin{figure}[H]
+\centering
+\fbox{
+\begin{minipage}{0.88\linewidth}
+\centering
+Token Input
+$\rightarrow$ Embedding
+$\rightarrow$ Transformer Block $\times 36$
+$\rightarrow$ Final RMSNorm
+$\rightarrow$ LM Head
+$\rightarrow$ Sampling
+
+\vspace{2mm}
+Transformer Block:
+RMSNorm
+$\rightarrow$ Q/K/V Projection
+$\rightarrow$ QK-Norm \& RoPE
+$\rightarrow$ Triton Attention
+$\rightarrow$ Output Projection
+$\rightarrow$ RMSNorm
+$\rightarrow$ Gate/Up Projection
+$\rightarrow$ SiLU-and-Mul
+$\rightarrow$ Down Projection
+\end{minipage}
+}
+\caption{Qwen3-4B 在 FlagOS 插件体系中的主要推理执行路径}
+\label{fig:route}
+\end{figure}
+
+\subsection{Profiling 结论}
+
+Profiling 结果显示，GEMM 是整体 CUDA 时间的最大组成部分，\code{aten::mm} 或编译后的 GEMM kernel 长期占据主要执行时间。随着输入长度增加，Attention 的 CUDA 时间占比明显上升，\code{chat\_6k} 中 \code{vllm::unified\_attention\_with\_output} 相关 kernel 已成为除 GEMM 之外最重要的耗时来源。这说明短上下文更受 decode 和 GEMM 吞吐影响，长上下文则更依赖 Attention 与 KV Cache 访问效率。
+
+另一个关键瓶颈来自执行模式。评测脚本传入了 \code{--enforce-eager}，该参数会使上游 vLLM 在模型配置阶段关闭图执行，并将编译优化路径降级。对于固定结构的 decode 过程，NVIDIA CUDA Graph 可以显著减少 launch 与调度开销；在 Ascend 上，vLLM 上层仍沿用 \code{CUDAGraphMode} 命名，但底层需要映射到 \code{torch.npu.NPUGraph}，并额外处理 paged attention 的动态图参数。因此，恢复图执行是本任务中最优先的系统级优化之一，但不同硬件的实现约束并不相同。
+
+\subsection{CUDA Graph fallback 分布}
+
+为了判断 CUDA Graph capture size 是否仍有优化空间，本文统计了运行时 dispatch 到 \code{FULL}、\code{PIECEWISE} 和 \code{NONE} 的比例。表~\ref{tab:cg-hit} 显示，默认 capture sizes 已经覆盖绝大多数 decode step，主要 fallback 出现在 mixed prefill 或 chunked prefill 阶段。
+
+\begin{table}[H]
+\centering
+\caption{默认 CUDA Graph dispatch 命中率}
+\label{tab:cg-hit}
+\begin{tabular}{lrrrrr}
+\toprule
+场景 & total steps & 命中率 & FULL & PIECEWISE & NONE \\
+\midrule
+\code{chat\_1k} & 1577 & 98.03\% & 1546 & 0 & 31 \\
+\code{chat\_4k} & 3526 & 96.03\% & 3386 & 0 & 140 \\
+\code{chat\_6k} & 5150 & 94.82\% & 4883 & 0 & 267 \\
+\code{batch\_8} & 20541 & 99.61\% & 20460 & 1 & 80 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+这一结果说明，继续盲目扩大 decode 小 batch capture sizes 的收益有限；如果要进一步优化 CUDA Graph，应针对大 mixed-prefill descriptor 设计精确命中或低 padding 的策略，而不是直接扩大全局 capture size 列表。
+
+\section{核心优化设计}
+
+\subsection{NVIDIA CUDA Graph 执行路径恢复}
+
+第一项优化是在 NVIDIA CUDA 路径绕过评测脚本传入的 \code{enforce\_eager=True}。实现上，在 \code{vllm\_fl/\_\_init\_\_.py} 的注册阶段提前 patch \code{EngineArgs.create\_model\_config()}，避免 \code{VllmConfig} 在更早阶段因为 \code{enforce\_eager=True} 将优化级别降到 \code{-O0} 并禁用 CUDA Graph。同时，在 \code{vllm\_fl/platform.py} 的平台配置阶段，如果发现上游已经将 \code{cudagraph\_mode} 降为 \code{NONE}，则在 NVIDIA CUDA 下恢复为 \code{FULL\_AND\_PIECEWISE}。CUDA 路径的恢复策略不复用到其他 vendor；Ascend NPU 的图模式由下一节单独配置。
+
+\subsection{Ascend NPU 图捕获实现}
+
+除 NVIDIA CUDA 路径外，本文也针对 Ascend 910C 实现了 \code{FULL\_DECODE\_ONLY} 图捕获。该实现参考 vLLM-Ascend~\cite{vllm-ascend} 的工程思路，但没有直接引入完整的 vLLM-Ascend OOT compiler 和 fusion pass 体系，而是在 FlagOS 插件内部复用 vLLM 上层 \code{CUDAGraphMode} 与 \code{CudagraphDispatcher} 抽象，并在底层切换到 \code{torch.npu.NPUGraph}。由于当前 Ascend 环境下 \code{torch.compile} 和 Inductor 路径不够稳定，平台配置阶段强制使用 \code{CompilationMode.NONE}，并将 graph mode 收敛为 \code{FULL\_DECODE\_ONLY}。
+
+Ascend 图捕获的核心难点在于 decode-only graph 中 attention metadata 不能被 capture 阶段的 dummy 输入固化。具体实现中，\code{vllm\_fl/\_\_init\_\_.py} 在 Ascend 运行时同样绕过 \code{enforce\_eager=True}，并设置 \code{TRITON\_ALL\_BLOCKS\_PARALLEL=1} 以避免大 KV Cache 初始化时的 Triton grid 限制；\code{vllm\_fl/platform.py} 将默认 capture sizes 设为 \code{[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112]}，覆盖赛题 decode 阶段常见 batch bucket；\code{vllm\_fl/worker/model\_runner.py} 使用 NPU 本地图捕获上下文，避免单卡 \code{hccl} 场景误走上游 CUDA graph capture。
+
+为了保证 replay 阶段输出正确，本文在 \code{vllm\_fl/compilation/graph.py} 中扩展了 \code{GraphWrapper}，为每个 capture bucket 记录 paged attention 所需的 workspace、external event、task handle 和 attention 参数。capture 阶段，Ascend attention 后端在 \code{forward\_paged\_attention()} 中创建 \code{torch.npu.ExternalEvent()}，用 \code{graph\_task\_group\_begin/end()} 包住 \code{torch\_npu.\_npu\_paged\_attention}，并保存可在 replay 时更新的 task handle。replay 阶段的顺序固定为 \code{synchronize -> replay -> graph\_task\_update\_begin/end -> event.record}：必须先调用 \code{entry.graph.replay()} 将图任务入队，再用运行时 \code{seq\_lens} 更新已经入队且被 event 阻塞的 paged attention task。如果把 task update 放到 replay 之前，长上下文 benchmark 会在 \code{graph\_task\_update\_end} 报 \code{507000}。
+
+长上下文场景还需要单独处理 paged attention workspace。原始 dummy capture 中 decode \code{seq\_lens} 通常为 1，\code{torch\_npu.\_npu\_paged\_attention\_get\_workspace()} 会据此申请过小 workspace；当 \code{chat\_6k} replay 时再把 \code{context\_lens} 更新到数千 token，就可能触发 runtime update 失败。因此，本文参考 vLLM-Ascend 的做法，在 Ascend \code{FULL\_DECODE\_ONLY} capture 时将 dummy \code{seq\_lens} 提升到 6144，以覆盖赛题长上下文 workload，而非 capture 路径仍保持真实 \code{max\_query\_len}。
+
+该 Ascend 图捕获路径已经能在 \code{flagos} 环境中通过 \code{test\_vllm.py} smoke test，日志包含 \code{cudagraph\_mode=<CUDAGraphMode.FULL\_DECODE\_ONLY: (2, 0)>} 和完整 capture bucket 配置。这里日志中的 ``CUDA graphs'' 是 vLLM 上层历史命名，Ascend 底层实际执行的是 \code{torch.npu.NPUGraph}。进一步统计表明，当前实现的 decode-only graph 命中率已经较高：4899 个 decode steps 中有 4880 个命中 full decode graph，命中率为 99.61\%；同时记录到的 fallback 原因包括 199 次非 uniform decode 场景和 21 次 force eager 场景。该结果说明，Ascend 图捕获的主要问题已经不是 capture bucket 覆盖不足，而是 graph replay、task update 和底层 attention kernel 成本抵消了部分收益。由于最终吞吐提升仍不明显，最终提交版没有将 Ascend \code{FULL\_DECODE\_ONLY} 图捕获作为默认启用项，而是保留为已验证的探索性实现。
+
+\begin{table}[H]
+\centering
+\caption{Ascend \code{FULL\_DECODE\_ONLY} 图捕获命中统计}
+\label{tab:ascend-graph-hit}
+\begin{tabular}{lr}
+\toprule
+指标 & 数值 \\
+\midrule
+\code{decode\_steps} & 4899 \\
+\code{full\_decode\_graph\_hits} & 4880 \\
+\code{decode\_hit\_rate} & 99.61\% \\
+\code{miss\_not\_uniform\_decode} & 199 \\
+\code{miss\_force\_eager} & 21 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Ascend 910C 图捕获关键实现点}
+\label{tab:ascend-graph}
+\begin{tabular}{p{0.27\linewidth}p{0.33\linewidth}p{0.32\linewidth}}
+\toprule
+模块 & 关键改动 & 作用 \\
+\midrule
+\code{EngineArgs} patch & Ascend 运行时绕过 \code{enforce\_eager}，设置 \code{TRITON\_ALL\_BLOCKS\_PARALLEL} & 保留图捕获入口，避免 KV Cache 初始化 grid 限制 \\
+\code{platform.py} & \code{FULL\_DECODE\_ONLY + CompilationMode.NONE}，capture sizes 覆盖 1 到 112 的常用 bucket & 避开 Inductor 不稳定路径，提高 decode-only graph 覆盖率 \\
+\code{model\_runner.py} & NPU 本地图捕获上下文，capture 时使用长 \code{seq\_lens} 申请 workspace & 支持单卡 Ascend capture，并覆盖长上下文 paged attention workspace \\
+\code{graph.py} & replay 后执行 NPU graph task update & 用运行时 \code{seq\_lens} 更新已入队 paged attention task，保证输出正确 \\
+\code{attention.py} & capture paged attention workspace、event、handle 和参数 & 让 \code{torch\_npu.\_npu\_paged\_attention} 能参与 NPU graph replay \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{FP8 KV Cache 与量化边界}
+
+第二项优化是在 CUDA 路径默认启用 FP8 KV Cache。当 \code{cache\_dtype} 仍为 \code{auto} 时，平台配置阶段将其改写为 \code{fp8}，从而让 Qwen3-4B 的 \code{TritonAttentionBackend} 进入上游已支持的 FP8 KV Cache 路径。实现中同时设置 \code{calculate\_kv\_scales=False}，避免 Triton attention 在当前路径中遇到非 1.0 \code{q\_scale} 不支持的问题。
+
+需要区分的是，FP8 KV Cache 与 FP8 权重量化不是同一个优化。前者主要降低 KV Cache 显存占用，提高长上下文并发能力；后者会改变权重和 GEMM 计算路径，对精度影响更直接。本文最终性能结果主要依赖 FP8 KV Cache；后续精度评测表明，该路径在部分推理任务上存在可观回退，因此如果以严格的全任务精度约束作为提交标准，应为 FP8 KV Cache 或其他近似路径提供可关闭的精度安全配置。
+
+在 Ascend 路径上，本文还实现了面向 dense Qwen3 attention 的 C8 KV Cache 探索路径。该路径通过注册 \code{ascend} quantization config，读取 \code{quant\_model\_description.json}、\code{kv\_cache\_quant\_manifest.json} 和 sidecar safetensors 中的 per-channel scale/offset，将 attention 层的 KV Cache dtype 设置为 \code{int8}，并切换到 \code{AscendC8AttentionBackendImpl}。这一工作主要用于评估 Ascend 上更激进的 KV Cache 压缩边界；由于其依赖额外量化 sidecar 文件，且需要更完整的精度评测支撑，本文不把 C8 路径写入最终默认提交方案。
+
+\subsection{场景化调度参数}
+
+第三项优化是在 \code{EngineArgs.from\_cli\_args()} 阶段识别 Qwen3-4B benchmark 场景。当 CLI 参数中包含 \code{input\_len} 和 \code{output\_len}，且模型名命中 \code{Qwen3-4B} 时，插件仅在用户没有显式传入相关参数的情况下，按表~\ref{tab:scheduler-defaults} 注入场景化默认值。
+
+\begin{table}[H]
+\centering
+\caption{Qwen3-4B benchmark 场景化调度默认值}
+\label{tab:scheduler-defaults}
+\begin{tabular}{lrrr}
+\toprule
+输入/输出长度 & \code{max\_model\_len} & \code{max\_num\_batched\_tokens} & \code{max\_num\_seqs} \\
+\midrule
+1024/1024 & 2056 & 16384 & 384 \\
+4096/1024 & 5128 & 12288 & 256 \\
+6144/1024 & 7176 & 8192 & 128 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+该设计有两个目的。首先，\code{max\_model\_len} 从模型默认的 40960 收缩到接近真实请求长度，减少不必要的显存预留。其次，不同输入长度使用不同的 \code{max\_num\_batched\_tokens} 和 \code{max\_num\_seqs}，在短输入场景提高并发，在长输入场景避免 OOM 并保持 chunked prefill 稳定。
+
+\subsection{算子后端选择}
+
+FlagOS dispatch 的默认优先级为 FlagOS/FlagGems 高于 vendor CUDA，但并非所有小算子都适合被 FlagGems 全局覆盖。实验发现，对于当前 RTX 4090 环境，保留 \code{attention\_backend} 走 FlagOS/Triton 路径，同时避免小算子广泛进入 FlagGems 覆盖路径，可以获得更稳定收益。因此，最终路径通过 \code{USE\_FLAGGEMS=1} 与 \code{VLLM\_FL\_FLAGOS\_WHITELIST=attention\_backend} 保留 attention 后端能力，并让小算子更多使用 vendor CUDA 实现。
+
+本文也评估了 FlashInfer attention。该路径在本地 RTX 4090 上对 \code{chat\_4k} 和 \code{chat\_6k} 有正收益，但 \code{chat\_1k} 略有回退，且提交到赛题官网时收益不稳定。因此，FlashInfer 在本文中作为探索性优化讨论，不作为最终默认启用路径。
+
+\subsection{投机解码验证}
+
+本文补充实现了 vLLM 0.13 中普通 draft-model speculative decoding 的实验路径，使用 Qwen3-0.6B 作为 Qwen3-4B 的 draft model。实现包括绕过上游对 \code{method=draft\_model} 的显式拒绝、创建 draft \code{ModelConfig}、修复连续 speculative step、修复 draft token 位置偏移以及按 request 对齐 draft probability。
+
+该路径最终不作为主优化启用。原因是当前 \code{vllm bench} 使用随机输入，Qwen3-0.6B 与 Qwen3-4B 的 token 分布匹配度很低，接受率常见仅为 0\% 到 6\%。在接受率过低时，额外 draft forward 成本无法由减少 target model step 的收益抵消。自适应降级可以避免该路径严重拖慢吞吐，但其本质是保护机制，而不是吞吐提升来源。
+
+\section{实验结果与消融分析}
+
+\subsection{总体结果}
+
+最终版本在本地 RTX 4090 上的总体效果如表~\ref{tab:final-throughput} 和表~\ref{tab:final-latency} 所示。相较 baseline，三组吞吐均有显著提升，且长上下文场景提升更大。几何平均吞吐由 3256.92 tokens/s 提升至 6980.68 tokens/s，提升 114.33\%。
+
+\begin{table}[H]
+\centering
+\caption{最终吞吐结果与 baseline 对比}
+\label{tab:final-throughput}
+\begin{tabular}{lrrr}
+\toprule
+场景 & Baseline(tokens/s) & 最终版本(tokens/s) & 提升比例 \\
+\midrule
+\code{chat\_1k} & 3840.62 & 7391.72 & 92.46\% \\
+\code{chat\_4k} & 3088.80 & 6984.57 & 126.13\% \\
+\code{chat\_6k} & 2912.25 & 6588.81 & 126.24\% \\
+几何平均 & 3256.92 & 6980.68 & 114.33\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{最终延迟结果与 baseline 对比}
+\label{tab:final-latency}
+\begin{tabular}{lrrrr}
+\toprule
+版本 & 平均延迟(ms) & P50(ms) & P90(ms) & P99(ms) \\
+\midrule
+Baseline & 66482.55 & 66038.95 & 67228.57 & 67254.50 \\
+最终版本 & 12769.15 & 12767.15 & 12774.54 & 12778.09 \\
+变化 & -80.79\% & -80.67\% & -81.00\% & -81.00\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{关键优化消融}
+
+表~\ref{tab:ablation-positive} 汇总了主要正收益优化的消融结果。CUDA Graph 恢复是最关键的系统级优化，单独启用后三组吞吐分别提升到 4507.38、3857.62 和 3635.28 tokens/s，同时将 \code{batch\_8} 平均延迟从 66.48 s 降至 19.53 s。FP8 KV Cache 在 \code{gpu\_memory\_utilization=0.8} 下仍能继续提升吞吐，说明显存压缩提高了有效并发能力。算子后端白名单带来的收益较小但稳定，有助于避免小算子路径的负优化。
+
+\begin{table}[H]
+\centering
+\caption{主要正收益优化消融结果}
+\label{tab:ablation-positive}
+\begin{tabular}{lrrrr}
+\toprule
+配置 & \code{chat\_1k} & \code{chat\_4k} & \code{chat\_6k} & 平均延迟(ms) \\
+\midrule
+Baseline & 3840.62 & 3088.80 & 2912.25 & 66482.55 \\
+启用 CUDA Graph & 4507.38 & 3857.62 & 3635.28 & 19526.76 \\
+CUDA Graph + FP8 KV Cache & 4966.60 & 4603.80 & 4099.40 & 20571.62 \\
+最终版本 & 7391.72 & 6984.57 & 6588.81 & 12769.15 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+算子选择的独立 A/B 结果如表~\ref{tab:operator-ablation} 所示。attention-only 路径在三组吞吐中均取得正收益，提升范围为 1.97\% 到 3.33\%，并将平均延迟降低约 2.05\%。
+
+\begin{table}[H]
+\centering
+\caption{算子后端选择 A/B 结果}
+\label{tab:operator-ablation}
+\begin{tabular}{lrrr}
+\toprule
+场景 & 默认路径(tokens/s) & attention-only(tokens/s) & 提升比例 \\
+\midrule
+\code{chat\_1k} & 6288.87 & 6412.92 & 1.97\% \\
+\code{chat\_4k} & 5867.28 & 5993.56 & 2.15\% \\
+\code{chat\_6k} & 5607.64 & 5794.37 & 3.33\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{未采用方案分析}
+
+系统优化中同样重要的是识别负收益或中性收益方向。表~\ref{tab:negative-results} 汇总了本文评估但最终未采用的方案。large-prefill CUDA Graph capture sizes 在吞吐场景下全部回退，原因是 vLLM 的 \code{pad\_for\_cudagraph()} 会把位于两个 capture size 之间的 batch token 数 padding 到下一个更大的 capture size，额外计算抵消了 graph replay 收益。TorchInductor GEMM autotune 在当前 workload 下显著回退，说明默认编译缓存与现有 kernel 选择已经更适合该任务。draft-model 投机解码在随机输入 benchmark 下接受率过低，也不应作为提交默认路径。Ascend \code{FULL\_DECODE\_ONLY} 图捕获虽然已经跑通并解决了正确性问题，但吞吐收益不明显，因此也没有作为最终默认启用项。
+
+\begin{table}[H]
+\centering
+\caption{未采用方案及原因}
+\label{tab:negative-results}
+\begin{tabular}{p{0.30\linewidth}p{0.30\linewidth}p{0.32\linewidth}}
+\toprule
+方案 & 实验现象 & 不采用原因 \\
+\midrule
+扩大 large-prefill CUDA Graph capture sizes & 三组吞吐下降 0.68\% 到 0.85\%，图显存显著增加 & padding 到大图后增加无效计算，收益无法覆盖额外开销 \\
+TorchInductor GEMM autotune & 吞吐下降 9.51\% 到 15.90\%，延迟接近翻倍 & 自动调优选择不适合当前 benchmark 和缓存路径 \\
+Qwen3-0.6B draft-model 投机解码 & 修复后功能可运行，但随机输入接受率约 0\% 到 6\% & draft forward 成本高于被接受 token 带来的 target step 节省 \\
+FlashInfer attention 默认启用 & 本地长上下文略有收益，短上下文略回退，官网提交收益不稳定 & 硬件和场景敏感，保留为可选探索路径 \\
+Ascend \code{FULL\_DECODE\_ONLY} NPU 图捕获 & \code{test\_vllm.py} 可通过，decode-only graph 能 capture/replay，但吞吐提升不明显 & 工程路径保留为可选实现，最终提交版不默认启用 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{精度与正确性验证}
+
+本文使用赛题提供的 \code{benchmarks/flagos\_eval/run\_eval.sh} 进行精度评测。为获得 baseline 精度，本文从原始 \code{vllm-plugin-FL} 仓库创建独立 conda 环境 \code{flagos-eval-baseline}，并将该环境中的 \code{vllm-plugin-fl} 重新安装到 \code{origin-temp/vllm-plugin-FL} 的 editable 路径；优化版本则直接使用当前 \code{flagos} 环境和当前仓库。两组评测均使用相同模型路径、相同评测脚本和相同任务集合，差异仅来自插件源码版本和对应默认配置。
+
+\begin{table}[H]
+\centering
+\caption{精度评测结果。相对变化按 $(\mathrm{Optimized}-\mathrm{Baseline})/\mathrm{Baseline}$ 计算。}
+\label{tab:accuracy-results}
+\begin{tabular}{lrrrr}
+\toprule
+任务 & Baseline & 性能优先版本 & 相对变化 & 是否在 -2\% 内 \\
+\midrule
+BBH & 0.7563 & 0.7291 & -3.60\% & 否 \\
+GSM8K & 0.8567 & 0.8461 & -1.24\% & 是 \\
+HumanEval & 0.7012 & 0.6951 & -0.87\% & 是 \\
+MBPP & 0.6240 & 0.6260 & +0.32\% & 是 \\
+MGSM direct zh & 0.4320 & 0.3960 & -8.33\% & 否 \\
+MGSM native CoT zh & 0.7520 & 0.7160 & -4.79\% & 否 \\
+六项宏平均 & 0.6870 & 0.6680 & -2.76\% & 否 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+表~\ref{tab:accuracy-results} 表明，当前性能优先版本并未在所有精度任务上满足 2\% 以内的回退约束。GSM8K、HumanEval 和 MBPP 的相对变化较小，说明 CUDA Graph 恢复、调度参数收缩和算子白名单本身没有造成普遍性正确性破坏；但 BBH 和中文 MGSM 的回退超过 2\%，结合实现路径看，主要风险来自 FP8 KV Cache 及其固定 scale 策略。因此，若以官方精度约束作为最终提交标准，应在保持吞吐收益的同时加入精度安全路径，例如对精度评测或敏感任务禁用 FP8 KV Cache，或仅在吞吐 benchmark 场景启用该近似优化。
+
+目前已有的正确性检查还包括 \code{test\_vllm.py} smoke test、Ascend NPU 图捕获smoke test和投机解码小规模验证。其中，非投机路径能够正常完成文本生成；Ascend \code{FULL\_DECODE\_ONLY} 图捕获路径在 \code{flagos} 环境中能够完成 capture/replay，生成结果与无图路径一致，实际 capture sizes 为 \code{[1,2,4,8,16,24,32,40,48,56,64,72,80,88,96,104,112]}，decode-only graph 命中率达到 99.61\%；draft-model 投机路径在修复 probability 对齐、连续 proposal 和位置偏移后不再出现 \code{expected N rows, got N+4} 一类错误。由于 Ascend 图捕获和投机解码最终均未作为默认提交路径，这些验证主要用于说明实现边界和后续可扩展性。
+
+\section{结论}
+
+本文针对 FlagOS 体系下 Qwen3-4B 的离线推理 benchmark 进行了系统级吞吐优化，并覆盖 NVIDIA CUDA 与 Ascend NPU 两类硬件路径。通过恢复 NVIDIA CUDA 上的 CUDA Graph 执行路径、启用 FP8 KV Cache、按固定输入长度收缩调度默认值，并保守选择算子后端，性能优先版本在 RTX 4090 上将三组吞吐的几何平均值提升 114.33\%，同时将 \code{batch\_8} 平均延迟降低 80.79\%。这些结果说明，在固定评测协议下，吞吐优化的关键并不只在单个 kernel，而在执行图、显存容量、调度并发和后端选择的协同。
+
+Ascend 910C 上的工作表明，跨硬件复用 vLLM 上层图调度抽象是可行的，但底层实现必须处理 NPU runtime 的特殊约束。本文实现的 \code{FULL\_DECODE\_ONLY} 路径通过 \code{torch.npu.NPUGraph}、paged attention task update、长上下文 workspace 预申请和覆盖到 112 的 capture bucket 解决了正确性问题，能够通过端到端smoke test，并在统计中达到 99.61\% 的 decode-only graph 命中率；但由于实际吞吐收益不明显，最终提交版没有默认启用该路径。这一结果也说明，图捕获在不同硬件上的收益并不只取决于 capture 命中率，还取决于 attention kernel、task update 成本、workspace 管理和调度形态是否匹配。
+
+消融实验也表明，并非所有看似高性能的机制都适合当前 workload。直接扩大 large-prefill CUDA Graph capture sizes 会由于 padding 产生负收益；TorchInductor GEMM autotune 在当前缓存和输入分布下不稳定；draft-model 投机解码需要较高接受率才能覆盖 draft forward 成本，而随机输入 benchmark 无法提供该条件。精度评测进一步表明，当前性能优先版本在六项主任务宏平均上相对 baseline 下降 2.76\%，尚不满足严格的 -2\% 精度约束。后续如果面向最终提交继续优化，应优先实现精度安全开关或按场景启用 FP8 KV Cache；如果面向真实文本或在线服务场景继续优化，则可以重点评估真实 prompt 分布下的投机解码接受率、按场景动态选择 FlashInfer/Triton attention、面向 mixed prefill 的 exact-match CUDA Graph 策略，以及 Ascend 上更细粒度的 graph bucket、C8 KV Cache 精度评测和 native attention 内核调度。
+
+\section*{致谢}
+
+感谢 FLAGOS 开放计算全球挑战赛提供的推理框架、评测任务和优化场景。本文实验基于 FlagOS、vLLM 与 FlagGems 生态完成。
+
+\begin{thebibliography}{9}
+\bibitem{flagos}
+FlagOS AI. vllm-plugin-FL. \url{https://github.com/flagos-ai/vllm-plugin-FL}.
+
+\bibitem{flaggems}
+FlagOpen. FlagGems. \url{https://github.com/FlagOpen/FlagGems}.
+
+\bibitem{qwen3}
+Qwen Team. Qwen3-4B model card. \url{https://huggingface.co/Qwen/Qwen3-4B}.
+
+\bibitem{vllm}
+Kwon W, Li Z, Zhuang S, et al. Efficient memory management for large language model serving with PagedAttention. Proceedings of the ACM SIGOPS Symposium on Operating Systems Principles, 2023.
+
+\bibitem{vllm-ascend}
+vLLM Project. vLLM Ascend backend. \url{https://github.com/vllm-project/vllm-ascend}.
+\end{thebibliography}
+
+\end{document}
