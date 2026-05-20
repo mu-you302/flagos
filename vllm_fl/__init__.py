@@ -1,7 +1,9 @@
 # Copyright (c) 2025 BAAI. All rights reserved.
 
+import json
 import os
 import logging
+from typing import Any
 
 from . import version as version  # PyTorch-style: vllm_fl.version.git_version
 
@@ -27,6 +29,8 @@ _QWEN3_4B_BENCHMARK_DEFAULTS = {
         "max_num_seqs": 128,
     },
 }
+
+_DEFAULT_DRAFT_MODEL_PATH = "/data/Qwen3-0.6B"
 
 
 def _normalize_model_name(model) -> str:
@@ -69,6 +73,58 @@ def _apply_qwen3_4b_benchmark_defaults(engine_args, args) -> dict[str, int]:
         )
 
     return applied
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").lower() in {"1", "true", "yes", "on"}
+
+
+def _get_optional_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None or value == "":
+        return None
+    return value
+
+
+def _get_speculative_config_from_env() -> dict[str, Any] | None:
+    raw_config = os.environ.get("VLLM_FL_SPECULATIVE_CONFIG")
+    if raw_config:
+        config = json.loads(raw_config)
+        if not isinstance(config, dict):
+            raise ValueError("VLLM_FL_SPECULATIVE_CONFIG must be a JSON object.")
+        return config
+
+    if not _truthy_env("VLLM_FL_ENABLE_DRAFT_SPECULATIVE"):
+        return None
+
+    return {
+        "model": os.environ.get("VLLM_FL_DRAFT_MODEL", _DEFAULT_DRAFT_MODEL_PATH),
+        "num_speculative_tokens": int(
+            os.environ.get("VLLM_FL_NUM_SPECULATIVE_TOKENS", "4")
+        ),
+    }
+
+
+def _apply_speculative_config_default(engine_args, args) -> bool:
+    if not _should_bypass_enforce_eager_for_cuda_runtime():
+        return False
+
+    if getattr(engine_args, "speculative_config", None) is not None:
+        return False
+
+    if not _get_qwen3_4b_benchmark_defaults(args):
+        return False
+
+    speculative_config = _get_speculative_config_from_env()
+    if speculative_config is None:
+        return False
+
+    speculative_config = dict(speculative_config)
+    speculative_config.setdefault("model", _DEFAULT_DRAFT_MODEL_PATH)
+    speculative_config.setdefault("num_speculative_tokens", 4)
+    setattr(engine_args, "speculative_config", speculative_config)
+    logger.info("Applied vllm_fl speculative config: %s", speculative_config)
+    return True
 
 
 def _should_bypass_enforce_eager_for_cuda_runtime() -> bool:
@@ -149,6 +205,7 @@ def _patch_engine_args_for_benchmark_defaults() -> None:
         engine_args = original_from_cli_args(cls, args)
         _apply_qwen3_4b_benchmark_defaults(engine_args, args)
         _apply_cuda_quantization_default(engine_args)
+        _apply_speculative_config_default(engine_args, args)
         return engine_args
 
     EngineArgs.from_cli_args = classmethod(from_cli_args_with_benchmark_defaults)
@@ -164,6 +221,131 @@ def _apply_cuda_flaggems_attention_defaults() -> None:
         and "VLLM_FL_FLAGOS_BLACKLIST" not in os.environ
     ):
         os.environ["VLLM_FL_FLAGOS_WHITELIST"] = "attention_backend"
+
+
+def _patch_engine_args_for_draft_model_spec_decode() -> None:
+    from vllm.engine.arg_utils import EngineArgs
+
+    if getattr(EngineArgs, "_fl_draft_model_spec_decode_patched", False):
+        return
+
+    original_check_feature_supported = EngineArgs._check_feature_supported
+
+    def check_feature_supported_with_draft_model(self, model_config):
+        speculative_config = getattr(self, "speculative_config", None)
+        method = (
+            speculative_config.get("method")
+            if isinstance(speculative_config, dict)
+            else getattr(speculative_config, "method", None)
+        )
+        if method == "draft_model":
+            if isinstance(speculative_config, dict):
+                patched_config = dict(speculative_config)
+                patched_config.pop("method", None)
+                self.speculative_config = patched_config
+                try:
+                    return original_check_feature_supported(self, model_config)
+                finally:
+                    self.speculative_config = speculative_config
+
+        return original_check_feature_supported(self, model_config)
+
+    EngineArgs._check_feature_supported = check_feature_supported_with_draft_model
+    EngineArgs._fl_draft_model_spec_decode_patched = True
+
+
+def _patch_speculative_config_for_draft_model() -> None:
+    import vllm.config.speculative as speculative_module
+    from vllm.config import ModelConfig
+    from vllm.config.speculative import SpeculativeConfig
+
+    if getattr(SpeculativeConfig, "_fl_draft_model_patched", False):
+        return
+
+    original_post_init = SpeculativeConfig.__post_init__
+
+    def _looks_like_plain_draft_model(config) -> bool:
+        if config.model is None:
+            return False
+        if config.method == "draft_model":
+            return True
+        if config.method is not None:
+            return False
+        model_name = str(config.model).lower()
+        return not any(marker in model_name for marker in ("eagle", "medusa"))
+
+    def _init_plain_draft_model(config) -> None:
+        if config.target_model_config is None:
+            raise ValueError("target_model_config must be present for draft_model")
+        if config.target_parallel_config is None:
+            raise ValueError("target_parallel_config must be present for draft_model")
+
+        config.method = "draft_model"
+        config.prompt_lookup_max = 0
+        config.prompt_lookup_min = 0
+
+        target_model_config = config.target_model_config
+        draft_quantization = _get_optional_env("VLLM_FL_DRAFT_QUANTIZATION")
+        config.draft_model_config = ModelConfig(
+            model=config.model,
+            runner="draft",
+            tokenizer=target_model_config.tokenizer,
+            tokenizer_mode=target_model_config.tokenizer_mode,
+            trust_remote_code=target_model_config.trust_remote_code,
+            allowed_local_media_path=target_model_config.allowed_local_media_path,
+            allowed_media_domains=target_model_config.allowed_media_domains,
+            dtype=target_model_config.dtype,
+            seed=target_model_config.seed,
+            revision=config.revision,
+            code_revision=config.code_revision,
+            tokenizer_revision=target_model_config.tokenizer_revision,
+            spec_target_max_model_len=target_model_config.max_model_len,
+            quantization=draft_quantization,
+            enforce_eager=target_model_config.enforce_eager,
+            max_logprobs=target_model_config.max_logprobs,
+            hf_overrides=SpeculativeConfig.hf_config_override,
+            config_format=target_model_config.config_format,
+        )
+
+        if config.num_speculative_tokens is None:
+            raise ValueError(
+                "num_speculative_tokens must be provided for draft_model "
+                "speculative decoding."
+            )
+
+        if config.speculative_token_tree is None:
+            config.speculative_token_tree = str(
+                [(i + 1) * (0,) for i in range(config.num_speculative_tokens)]
+            )
+
+        config.draft_tensor_parallel_size = (
+            SpeculativeConfig._verify_and_get_draft_tp(
+                config.target_parallel_config,
+                config.draft_tensor_parallel_size,
+                config.draft_model_config.hf_config,
+            )
+        )
+        config.draft_model_config.max_model_len = (
+            SpeculativeConfig._maybe_override_draft_max_model_len(
+                config.max_model_len,
+                config.draft_model_config.max_model_len,
+                target_model_config.max_model_len,
+            )
+        )
+        config.draft_parallel_config = SpeculativeConfig.create_draft_parallel_config(
+            config.target_parallel_config,
+            config.draft_tensor_parallel_size,
+        )
+
+    def post_init_with_plain_draft_model(self):
+        if _looks_like_plain_draft_model(self):
+            _init_plain_draft_model(self)
+            return self
+        return original_post_init(self)
+
+    SpeculativeConfig.__post_init__ = post_init_with_plain_draft_model
+    speculative_module.SpeculativeConfig.__post_init__ = post_init_with_plain_draft_model
+    SpeculativeConfig._fl_draft_model_patched = True
 
 def __getattr__(name):
     if name == "distributed":
@@ -203,6 +385,8 @@ def register():
 
 def register_model():
     """Register the FL model."""
+    # _patch_speculative_config_for_draft_model()
+    # _patch_engine_args_for_draft_model_spec_decode()
     _patch_engine_args_for_benchmark_defaults()
     _patch_engine_args_for_cuda_graph()
 

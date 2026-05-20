@@ -266,24 +266,95 @@ vLLM 0.13.0 支持 BF16 → FP8 在线量化：--quantization fp8
 2. 当入口来自 `vllm bench throughput` / `vllm bench latency`，且 CLI 参数中包含 `input_len`、`output_len`，模型名命中 `Qwen3-4B` 时，会在 `from_cli_args()` 阶段识别 benchmark 场景。
 3. 仅当用户没有显式传入 `max_model_len`、`max_num_batched_tokens`、`max_num_seqs` 时，才会按场景注入默认值，不覆盖用户手工指定参数。
 4. 当前场景映射为：
-   - `1024 / 1024 -> max_model_len=2056, max_num_batched_tokens=16384, max_num_seqs=512`
+   - `1024 / 1024 -> max_model_len=2056, max_num_batched_tokens=16384, max_num_seqs=384`
    - `4096 / 1024 -> max_model_len=5128, max_num_batched_tokens=12288, max_num_seqs=256`
    - `6144 / 1024 -> max_model_len=7176, max_num_batched_tokens=8192, max_num_seqs=128`
 5. 该 patch 发生在 `create_engine_config()` 和 worker 初始化之前，因此适合做 benchmark 场景相关的调度默认值改写；对不带 `input_len/output_len` 的普通离线推理和其他模型路径不生效。
 
-### THROUGHPUT TEST RESULTS
+# 新增实验开关——Qwen3-0.6B draft-model 投机解码
 
-| Scenario | Prompts | Tokens | Time(s) | Tokens/s | Req/s |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **chat_1k** | 300 | 614,400 | 115.1 | 5,336.4 | 2.61 |
-| **chat_4k** | 300 | 1,536,000 | 292.3 | 5,254.5 | 1.03 |
-| **chat_6k** | 300 | 2,150,400 | 417.7 | 5,148.2 | 0.72 |
+已在 `vllm_fl` 内补上 vLLM 0.13 plain draft-model speculative decoding 的实验路径：
 
-### LATENCY TEST RESULTS
+1. vLLM 0.13 原生支持 `--speculative-config` 参数，但在 `SpeculativeConfig.__post_init__()` 和 `EngineArgs._check_feature_supported()` 中会显式拒绝普通 draft model，只保留 `ngram / suffix / medusa / eagle / mtp` 等路径。
+2. 当前补丁只在插件侧打开 `draft_model` 路径，不改 `benchmarks/flagos_eval/run_benchmark.sh`。
+3. 默认不开启投机解码；只有设置环境变量时才会对 `Qwen3-4B + benchmark input_len/output_len` 场景注入配置。
+4. A/B 推荐命令：
 
-| Scenario | Iters | Mean(ms) | P50(ms) | P90(ms) | P99(ms) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **batch_8** | 10 | 17,449.57 | 17,159.61 | 17,554.77 | 20,222.88 |
+```bash
+# A: 关闭投机解码
+unset VLLM_FL_ENABLE_DRAFT_SPECULATIVE VLLM_FL_SPECULATIVE_CONFIG
+bash benchmarks/flagos_eval/run_benchmark.sh
+
+# B: 开启 Qwen3-0.6B draft model，等价于 --speculative-config '{"model": "/data1/xiyang/Download/Qwen3-0.6B", "num_speculative_tokens": 4}'
+export VLLM_FL_ENABLE_DRAFT_SPECULATIVE=1
+export VLLM_FL_DRAFT_MODEL=/data1/xiyang/Download/Qwen3-0.6B
+export VLLM_FL_NUM_SPECULATIVE_TOKENS=4
+bash benchmarks/flagos_eval/run_benchmark.sh
+```
+
+也可以直接传完整 JSON：
+
+```bash
+export VLLM_FL_SPECULATIVE_CONFIG='{"model": "/data1/xiyang/Download/Qwen3-0.6B", "num_speculative_tokens": 4}'
+```
+
+实现注意：
+
+1. `DraftModelProposer` 位于 `vllm_fl/spec_decode/draft_model.py`，加载独立 draft model，并把 draft attention 层注册到主 `VllmConfig`，让 KV cache 初始化阶段能发现这些层。
+2. draft 模型初始化时必须临时把 `vllm_config.model_config` 切到 Qwen3-0.6B，否则模型结构会按 Qwen3-4B 的 hidden size 创建，加载权重时会出现 embedding 维度不匹配。
+3. draft forward 当前强制 eager，不走 vLLM piecewise torch.compile；plain draft model 不是 vLLM 0.13 原生支持路径，直接复用主模型编译配置会触发 `sym_shape_indices` 为空的问题。
+4. 已修复连续 speculative step 的处理：不再因为上一轮带 `spec_decode_metadata` 就跳过 draft 生成，而是使用 `input_batch.num_tokens_no_spec` 作为当前已确认序列长度，并在 draft KV cache 中覆盖旧 speculative slot。
+5. 已修复 draft token 位置偏移：draft forward 的第一个 token 位置应为 `base_seq_len - 1`，用于基于最后一个已确认 token 预测下一个 token；后续 draft token 位置依次递增。
+6. 已修复 draft probability 对齐问题：原实现把所有 draft probs 扁平保存，scheduler 可能只保留部分 draft tokens，导致 rejection sampler 中反复出现 `Discarding draft probabilities: expected N rows, got N+4`。现在按 `req_id -> prob rows` 保存，并在 `_sample()` 中按当前 `SpecDecodeMetadata.num_draft_tokens` 和 batch request 顺序精确切片。
+7. 混合采样场景下已补充 greedy row 处理：当 batch 中部分 request 是 greedy、部分 request 是 random 时，greedy request 使用 argmax，避免错误地走 multinomial。
+8. 增加低接受率自适应降级，避免随机 benchmark 中 draft model 接受率过低时持续拖慢吞吐：
+   - `VLLM_FL_DRAFT_MIN_ACCEPTANCE_RATE`，默认 `0.2`
+   - `VLLM_FL_DRAFT_LOW_ACCEPTANCE_PATIENCE`，默认 `2`
+   - `VLLM_FL_DRAFT_LOW_ACCEPTANCE_COOLDOWN`，默认 `64`
+   - 如果接受率连续低于阈值，会暂停若干 decode step 的 draft proposal；设置 `VLLM_FL_DRAFT_MIN_ACCEPTANCE_RATE=0` 可关闭该策略。
+
+### 修复前 A/B 结果
+
+结果目录：
+
+`ab_results/spec_decode_ab_20260518_203647`
+
+| 场景 | baseline | speculative | 变化 |
+|------|----------|-------------|------|
+| chat_1k tokens/s | 7421.86 | 1989.66 | -73.19% |
+| chat_4k tokens/s | 7002.55 | 1890.97 | -72.99% |
+| chat_6k tokens/s | 6621.97 | 1817.39 | -72.55% |
+| batch_8 mean latency | 12726.17 ms | 72549.09 ms | +469.99% |
+
+修复前性能很差的直接原因：
+
+1. draft probability 行数和 scheduler 实际保留的 draft token 数不一致，rejection sampler 经常拿不到有效 draft probs。
+2. 连续 speculative step 被跳过，导致 draft model 只间歇性工作，吞吐收益无法形成。
+3. benchmark 使用随机输入，Qwen3-0.6B 与 Qwen3-4B 的 token 分布匹配度很低，接受率常见只有 0%～6%。
+4. 当前 plain draft-model 路径每个 speculative token 都串行执行一次 0.6B draft forward，额外开销较大；低接受率时必然负收益。
+
+### 修复后 smoke 验证
+
+使用 `flagos` 环境、最后一张 GPU，命令中显式传：
+
+```bash
+--speculative-config '{"model":"/data1/xiyang/Download/Qwen3-0.6B","num_speculative_tokens":4}'
+```
+
+小规模验证：`input_len=128, output_len=32, num_prompts=4`。
+
+| 配置 | output tokens/s | 现象 |
+|------|----------------:|------|
+| baseline | 203.17 | 非投机解码 |
+| speculative 修复概率对齐后 | 24.97 | 无 probability mismatch，但随机输入接受率很低 |
+| speculative + 自适应降级 | 201.06 | 接受率约 0.06，触发暂停 draft proposal，吞吐回到接近 baseline |
+
+### 当前结论
+
+1. 实现层面的主要 bug 已修复：draft-model 能加载、能连续 proposal，draft probs 能按 request 和实际 draft token 数对齐，冒烟测试不再出现 `expected N rows, got N+4`。
+2. 但在当前 `vllm bench` 随机输入 A/B 中，`Qwen3-0.6B -> Qwen3-4B` draft-model 投机解码不提升吞吐；核心瓶颈是接受率过低，无法覆盖额外 draft forward 成本。
+3. 自适应降级可以避免低接受率场景把结果严重拉低，但它本质上是保护机制，不是吞吐优化来源。
+4. 如果继续评估投机解码收益，应换成真实文本 prompt / chat 数据，并记录 acceptance rate；只有接受率稳定较高时，`num_speculative_tokens=2/4` 才有继续调参意义。
 
 # 算子选择
 当前算子默认优先级为 flagos > vendor，但是对于小算子，使用cuda原生实现可能更优。

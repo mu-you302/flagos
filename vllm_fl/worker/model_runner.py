@@ -221,6 +221,7 @@ from vllm_fl.dispatch.io_dumper import (
     init_io_dump_from_env,
     register_io_module_hooks,
 )
+from vllm_fl.spec_decode.draft_model import DraftModelProposer
 
 logger = init_logger(__name__)
 
@@ -442,12 +443,20 @@ class ModelRunnerFL(
         # layers in the draft model.
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
-                NgramProposer | SuffixDecodingProposer | EagleProposer | MedusaProposer
+                NgramProposer
+                | SuffixDecodingProposer
+                | EagleProposer
+                | MedusaProposer
+                | DraftModelProposer
             )
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
+            elif self.speculative_config.method == "draft_model":
+                self.drafter = DraftModelProposer(
+                    self.vllm_config, self.device, self
+                )
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
@@ -2117,6 +2126,7 @@ class ModelRunnerFL(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
             cu_num_draft_tokens=cu_num_draft_tokens,
+            cu_num_sampled_tokens=cu_num_sampled_tokens,
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
@@ -2644,9 +2654,18 @@ class ModelRunnerFL(
                 sampling_metadata=sampling_metadata,
             )
 
+        draft_probs = None
+        if hasattr(self.drafter, "take_draft_probs"):
+            num_draft_tokens = spec_decode_metadata.num_draft_tokens
+            draft_probs = self.drafter.take_draft_probs(
+                sum(num_draft_tokens),
+                self.input_batch.req_ids[: len(num_draft_tokens)],
+                num_draft_tokens,
+            )
+
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
-            None,  # draft_probs
+            draft_probs,
             logits,
             sampling_metadata,
         )
@@ -3491,6 +3510,21 @@ class ModelRunnerFL(
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, SuffixDecodingProposer)
             draft_token_ids = self.drafter.propose(self.input_batch, sampled_token_ids)
+        elif spec_config.method == "draft_model":
+            assert isinstance(sampled_token_ids, list)
+            assert isinstance(self.drafter, DraftModelProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids=sampled_token_ids,
+                req_ids=self.input_batch.req_ids,
+                requests=self.requests,
+                input_batch=self.input_batch,
+                common_attn_metadata=common_attn_metadata,
+                sampling_metadata=sampling_metadata,
+                spec_decode_unsupported_reqs=(
+                    self.input_batch.spec_decode_unsupported_reqs
+                ),
+                previous_spec_decode_metadata=spec_decode_metadata,
+            )
         elif spec_config.method == "medusa":
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, MedusaProposer)
